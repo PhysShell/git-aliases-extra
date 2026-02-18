@@ -78,7 +78,7 @@ To publish from CI:
 ## What CI checks
 
 - `PSScriptAnalyzer` linting with `PSScriptAnalyzerSettings.psd1`
-- `Pester` tests in `tests\`
+- `Pester` tests in `tests\` (module + integration)
 - GitHub Actions matrix on:
   - Windows PowerShell
   - PowerShell 7
