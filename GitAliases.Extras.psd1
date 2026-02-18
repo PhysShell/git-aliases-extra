@@ -4,8 +4,8 @@
     GUID = 'a5c2859e-7dce-4853-9db5-8cb7927dbdda'
     Author = 'PhysShell'
     CompanyName = ''
-    Copyright = ''
-    Description = 'Custom git aliases and tab completion helpers for PowerShell on top of posh-git'
+    Copyright = 'Copyright (c) PhysShell.'
+    Description = 'Custom git aliases and robust tab completion helpers for PowerShell.'
     PowerShellVersion = '5.1'
     CompatiblePSEditions = @('Desktop', 'Core')
     FunctionsToExport = @(
@@ -39,9 +39,17 @@
         'gswc',
         'Register-GitAliasCompletion'
     )
-    AliasesToExport = @(
-        'gum',
-        'gur',
-        'gh'
-    )
+    AliasesToExport = @('gum', 'gur', 'gh')
+    CmdletsToExport = @()
+    VariablesToExport = '*'
+    RequiredModules = @('posh-git', 'git-aliases')
+    PrivateData = @{
+        PSData = @{
+            Tags = @('git', 'aliases', 'completion', 'posh-git', 'powershell')
+            ProjectUri = 'https://github.com/PhysShell/GitAliases.Extras'
+            LicenseUri = 'https://github.com/PhysShell/GitAliases.Extras/blob/main/LICENSE'
+            RepositorySourceLocation = 'https://github.com/PhysShell/GitAliases.Extras'
+            ReleaseNotes = 'Standalone module extracted from dotfiles.'
+        }
+    }
 }
