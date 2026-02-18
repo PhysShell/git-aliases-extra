@@ -47,3 +47,11 @@ Describe 'GitAliases.Extras module exports' {
         Get-Command Register-GitAliasCompletion -ErrorAction Stop | Should -Not -BeNullOrEmpty
     }
 }
+
+Describe 'GitAliases.Extras tooling' {
+    It 'includes install-hooks and hook templates' {
+        (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'tools\install-hooks.ps1')) | Should -BeTrue
+        (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'tools\hooks\pre-commit')) | Should -BeTrue
+        (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'tools\hooks\commit-msg')) | Should -BeTrue
+    }
+}

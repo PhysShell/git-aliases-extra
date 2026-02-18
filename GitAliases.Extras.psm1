@@ -400,6 +400,11 @@ function Register-GitAliasCompletion {
 
         # Reconstruct the command line as if 'git <subcommand>' was typed
         $line = $commandAst.Extent.Text
+        # CommandAst extent drops trailing whitespace, but completion context
+        # depends on it (e.g. "gsw " vs "gsw"). Restore it using cursor offset.
+        if ($cursorPosition -gt $line.Length) {
+            $line += (' ' * ($cursorPosition - $line.Length))
+        }
         $gitLine = $line -replace "^$commandName", "git $subCommand"
         $offset = ("git $subCommand").Length - $commandName.Length
         $gitCursorPosition = $cursorPosition + $offset
