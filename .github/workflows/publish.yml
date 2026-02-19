@@ -12,6 +12,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install Dependencies
+        shell: pwsh
+        run: |
+          if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force
+          }
+          Set-PSRepository PSGallery -InstallationPolicy Trusted
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -RequiredVersion 1.22.0 -Force
+          Install-Module Pester -Scope CurrentUser -RequiredVersion 5.7.1 -Force
+          Install-Module posh-git -Scope CurrentUser -Force
+          Install-Module git-aliases -Scope CurrentUser -Force
+          Install-Module PowerShellGet -Scope CurrentUser -RequiredVersion 2.2.5 -Force
+
+      - name: Run Lint and Tests
+        shell: pwsh
+        run: |
+          .\tools\ci.ps1
+
       - name: Validate Module Version Against Tag
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -22,14 +40,21 @@ jobs:
             throw "Manifest version '$($manifest.Version)' does not match tag version '$tagVersion'."
           }
 
-      - name: Install PowerShellGet
+      - name: Validate and Stage Release Notes
         shell: pwsh
         run: |
-          if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force
+          $manifestPath = Resolve-Path -LiteralPath .\git-aliases-extra.psd1 |
+            Select-Object -ExpandProperty Path -First 1
+          $manifest = Test-ModuleManifest -Path $manifestPath -ErrorAction Stop
+          $moduleVersion = $manifest.Version.ToString()
+
+          $releaseNotes = .\tools\get-release-notes.ps1 -Version $moduleVersion
+          if (-not $releaseNotes) {
+            throw "Release notes for version '$moduleVersion' are empty."
           }
-          Set-PSRepository PSGallery -InstallationPolicy Trusted
-          Install-Module PowerShellGet -Scope CurrentUser -Force
+
+          Update-ModuleManifest -Path $manifestPath -ReleaseNotes $releaseNotes
+          Write-Host "Release notes for version '$moduleVersion' loaded from CHANGELOG.md."
 
       - name: Publish to PSGallery
         shell: pwsh

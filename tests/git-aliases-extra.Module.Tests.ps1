@@ -27,6 +27,9 @@ Describe 'git-aliases-extra manifest' {
         $manifest = Import-PowerShellDataFile -Path $script:ModuleManifest
         $manifest.PrivateData.PSData.ProjectUri | Should -Match '^https://github.com/PhysShell/git-aliases-extra'
         $manifest.PrivateData.PSData.LicenseUri | Should -Match '/LICENSE$'
+        $manifest.PrivateData.PSData.IconUri | Should -Match '/assets/icon\.png$'
+        $manifest.PrivateData.PSData.ReleaseNotes | Should -Not -BeNullOrEmpty
+        $manifest.Copyright | Should -Match '\b\d{4}\b'
 
         $requiredModuleNames = @($manifest.RequiredModules | ForEach-Object {
             if ($_ -is [string]) { $_ } else { $_.ModuleName }
@@ -55,5 +58,19 @@ Describe 'git-aliases-extra tooling' {
         (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'tools\install-hooks.ps1')) | Should -BeTrue
         (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'tools\hooks\pre-commit')) | Should -BeTrue
         (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'tools\hooks\commit-msg')) | Should -BeTrue
+    }
+
+    It 'includes changelog, icon and release notes helper script' {
+        (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'CHANGELOG.md')) | Should -BeTrue
+        (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'assets\icon.png')) | Should -BeTrue
+        (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'tools\get-release-notes.ps1')) | Should -BeTrue
+    }
+
+    It 'resolves release notes from changelog for manifest version' {
+        $manifest = Test-ModuleManifest -Path $script:ModuleManifest -ErrorAction Stop
+        $version = $manifest.Version.ToString()
+        $scriptPath = Join-Path $script:RepoRoot 'tools\get-release-notes.ps1'
+        $notes = & $scriptPath -Version $version
+        $notes | Should -Not -BeNullOrEmpty
     }
 }

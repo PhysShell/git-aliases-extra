@@ -287,8 +287,9 @@ This repository includes:
 To publish from CI:
 
 1. Add repository secret `PSGALLERY_API_KEY`.
-2. Bump `ModuleVersion` in `git-aliases-extra.psd1`.
-3. Push a tag `v<ModuleVersion>` (for example, `v0.1.0`) or run the publish workflow manually.
+2. Add release notes to `CHANGELOG.md` under `## [<ModuleVersion>] - YYYY-MM-DD`.
+3. Bump `ModuleVersion` in `git-aliases-extra.psd1`.
+4. Push a tag `v<ModuleVersion>` (for example, `v0.1.0`) or run the publish workflow manually.
 
 ## What CI checks
 
