@@ -50,7 +50,16 @@
     AliasesToExport = @('gum', 'gur', 'gh')
     CmdletsToExport = @()
     VariablesToExport = '*'
-    RequiredModules = @('posh-git', 'git-aliases')
+    RequiredModules = @(
+        @{
+            ModuleName = 'posh-git'
+            ModuleVersion = '1.1.0'
+        },
+        @{
+            ModuleName = 'git-aliases'
+            ModuleVersion = '0.3.8'
+        }
+    )
     PrivateData = @{
         PSData = @{
             Tags = @('git', 'aliases', 'completion', 'posh-git', 'powershell', 'worktree')
@@ -59,7 +68,6 @@
             IconUri = 'https://raw.githubusercontent.com/PhysShell/git-aliases-extra/main/assets/icon.png'
             RepositorySourceLocation = 'https://github.com/PhysShell/git-aliases-extra'
             ReleaseNotes = 'See CHANGELOG.md for release notes.'
-            ExternalModuleDependencies = @('posh-git', 'git-aliases')
             RequireLicenseAcceptance = $false
         }
     }

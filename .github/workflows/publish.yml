@@ -56,6 +56,16 @@ jobs:
           Update-ModuleManifest -Path $manifestPath -ReleaseNotes $releaseNotes
           Write-Host "Release notes for version '$moduleVersion' loaded from CHANGELOG.md."
 
+      - name: Prepare Publish Layout
+        id: prepare_publish
+        shell: pwsh
+        run: |
+          $publishPath = .\tools\prepare-publish.ps1 `
+            -SourcePath . `
+            -OutputPath (Join-Path $env:RUNNER_TEMP 'git-aliases-extra-publish')
+
+          "publish_path=$publishPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Publish to PSGallery
         shell: pwsh
         env:
@@ -65,7 +75,9 @@ jobs:
             throw "PSGALLERY_API_KEY secret is not set."
           }
 
-          $manifest = Test-ModuleManifest -Path .\git-aliases-extra.psd1 -ErrorAction Stop
+          $publishPath = '${{ steps.prepare_publish.outputs.publish_path }}'
+          $stagedManifestPath = Join-Path $publishPath 'git-aliases-extra.psd1'
+          $manifest = Test-ModuleManifest -Path $stagedManifestPath -ErrorAction Stop
           $moduleName = $manifest.Name
           $moduleVersion = $manifest.Version.ToString()
 
@@ -77,4 +89,4 @@ jobs:
             exit 0
           }
 
-          Publish-Module -Path . -Repository PSGallery -NuGetApiKey $env:PSGALLERY_API_KEY -Verbose
+          Publish-Module -Path $publishPath -Repository PSGallery -NuGetApiKey $env:PSGALLERY_API_KEY -ErrorAction Stop
