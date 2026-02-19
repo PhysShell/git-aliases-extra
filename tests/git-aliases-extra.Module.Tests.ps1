@@ -44,6 +44,8 @@ Describe 'git-aliases-extra module exports' {
     It 'exports key commands' {
         Get-Command gsw -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command gfp -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gwt -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gwtr -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command Register-GitAliasCompletion -ErrorAction Stop | Should -Not -BeNullOrEmpty
     }
 }

@@ -73,7 +73,7 @@ function Convert-ToPowerShellBranchCompletionText {
 function Get-GitLongOptionCompletions {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$SubCommand,
+        [string]$SubCommandLine,
         [Parameter(Mandatory = $true)]
         [string]$WordToComplete
     )
@@ -83,7 +83,10 @@ function Get-GitLongOptionCompletions {
     }
 
     try {
-        $helpText = git $SubCommand -h 2>&1 | Out-String
+        $commandParts = @($SubCommandLine -split '\s+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($commandParts.Count -eq 0) { return @() }
+
+        $helpText = (& git @commandParts -h 2>&1 | Out-String)
         if (-not $helpText) { return @() }
 
         $rawTokens = [regex]::Matches($helpText, '--[^\s,]+') |
@@ -155,6 +158,139 @@ function Format-GitAliasDefinitionSafe {
     }
 
     return ($definitionLines -join "`n")
+}
+
+function Convert-ToPowerShellPathCompletionText {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PathValue
+    )
+
+    if ($PathValue -match "[\s']") {
+        $escaped = $PathValue -replace "'", "''"
+        return "'$escaped'"
+    }
+
+    return $PathValue
+}
+
+function Get-GitWorktreePaths {
+    if (-not (Test-InGitRepo)) {
+        return @()
+    }
+
+    try {
+        $lines = @(& git worktree list --porcelain 2>$null)
+        if ($LASTEXITCODE -ne 0 -or -not $lines) {
+            return @()
+        }
+
+        $paths = $lines |
+            Where-Object { $_ -like 'worktree *' } |
+            ForEach-Object { $_.Substring(9).Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            Sort-Object -Unique
+
+        return @($paths)
+    } catch {
+        return @()
+    }
+}
+
+function Get-GitWorktreePathCompletions {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CommandName,
+        [Parameter(Mandatory = $true)]
+        [string]$Line,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$WordToComplete
+    )
+
+    $tokens = $null
+    $errors = $null
+    [System.Management.Automation.Language.Parser]::ParseInput($Line, [ref]$tokens, [ref]$errors) | Out-Null
+    $tokenTexts = @(
+        $tokens |
+        Where-Object { $_.Kind.ToString() -notin @('EndOfInput', 'NewLine') } |
+        ForEach-Object { $_.Text }
+    )
+
+    if ($tokenTexts.Count -eq 0) {
+        return @()
+    }
+
+    $action = ''
+    $argumentTokens = @()
+
+    switch ($CommandName) {
+        'gwtr' {
+            $action = 'remove'
+            if ($tokenTexts.Count -gt 1) {
+                $argumentTokens = @($tokenTexts[1..($tokenTexts.Count - 1)])
+            }
+        }
+        'gwtm' {
+            $action = 'move'
+            if ($tokenTexts.Count -gt 1) {
+                $argumentTokens = @($tokenTexts[1..($tokenTexts.Count - 1)])
+            }
+        }
+        'gwt' {
+            if ($tokenTexts.Count -lt 2) {
+                return @()
+            }
+
+            $action = $tokenTexts[1]
+            if ($tokenTexts.Count -gt 2) {
+                $argumentTokens = @($tokenTexts[2..($tokenTexts.Count - 1)])
+            }
+        }
+        default {
+            return @()
+        }
+    }
+
+    if ($action -notin @('remove', 'move')) {
+        return @()
+    }
+
+    $nonOptionArgCount = @($argumentTokens | Where-Object { -not $_.StartsWith('-') }).Count
+    $hasWord = -not [string]::IsNullOrWhiteSpace($WordToComplete)
+    $completeFirstPath = $nonOptionArgCount -eq 0 -or ($nonOptionArgCount -eq 1 -and $hasWord)
+    if (-not $completeFirstPath) {
+        return @()
+    }
+
+    $prefix = $WordToComplete.Trim("'", '"')
+    $worktreePaths = Get-GitWorktreePaths
+    if (-not $worktreePaths -or $worktreePaths.Count -eq 0) {
+        return @()
+    }
+
+    $filteredPaths = if ([string]::IsNullOrWhiteSpace($prefix)) {
+        $worktreePaths
+    } else {
+        $worktreePaths | Where-Object {
+            $_ -like "$prefix*" -or (Split-Path -Path $_ -Leaf) -like "$prefix*"
+        }
+    }
+
+    if (-not $filteredPaths) {
+        return @()
+    }
+
+    return @($filteredPaths | Sort-Object -Unique | ForEach-Object {
+        $pathValue = [string]$_
+        $completionText = Convert-ToPowerShellPathCompletionText -PathValue $pathValue
+        [System.Management.Automation.CompletionResult]::new(
+            $completionText,
+            $pathValue,
+            'ParameterValue',
+            "git worktree path: $pathValue"
+        )
+    })
 }
 
 function Get-GitAliasEntries {
@@ -313,6 +449,12 @@ function gdt    { git diff-tree --no-commit-id --name-only -r @args }
 function gdnolock { git diff @args ":(exclude)package-lock.json" ":(exclude)*.lock" }
 function gdv    { git diff -w @args | Out-String | less }
 function gfo    { git fetch origin @args }
+function gwt    { git worktree @args }
+function gwta   { git worktree add @args }
+function gwtl   { git worktree list @args }
+function gwtm   { git worktree move @args }
+function gwtr   { git worktree remove @args }
+function gwtp   { git worktree prune @args }
 function glp    { param([string]$format) if($format){ git log --pretty=$format } else { git log } }
 function gmtl   { git mergetool --no-prompt @args }
 function gmtlvim{ git mergetool --no-prompt --tool=vimdiff @args }
@@ -537,6 +679,12 @@ function Register-GitAliasCompletion {
     $script:gitAliasMap['gur'] = 'rebase'
     $script:gitAliasMap['gccd'] = 'clone'
     $script:gitAliasMap['gsw'] = 'switch'
+    $script:gitAliasMap['gwt'] = 'worktree'
+    $script:gitAliasMap['gwta'] = 'worktree add'
+    $script:gitAliasMap['gwtl'] = 'worktree list'
+    $script:gitAliasMap['gwtm'] = 'worktree move'
+    $script:gitAliasMap['gwtr'] = 'worktree remove'
+    $script:gitAliasMap['gwtp'] = 'worktree prune'
 
     if ($script:gitAliasMap.Count -eq 0) {
         Write-Warning "No git alias functions were found to register for completion."
@@ -548,7 +696,8 @@ function Register-GitAliasCompletion {
         param($wordToComplete, $commandAst, $cursorPosition)
 
         $commandName = $commandAst.CommandElements[0].Value
-        $subCommand = $script:gitAliasMap[$commandName]
+        $subCommandLine = [string]$script:gitAliasMap[$commandName]
+        $primarySubCommand = ($subCommandLine -split '\s+')[0]
 
         # Reconstruct the command line as if 'git <subcommand>' was typed
         $line = $commandAst.Extent.Text
@@ -557,26 +706,36 @@ function Register-GitAliasCompletion {
         if ($cursorPosition -gt $line.Length) {
             $line += (' ' * ($cursorPosition - $line.Length))
         }
-        $gitLine = $line -replace "^$commandName", "git $subCommand"
-        $offset = ("git $subCommand").Length - $commandName.Length
+        $gitLine = $line -replace "^$commandName", "git $subCommandLine"
+        $offset = ("git $subCommandLine").Length - $commandName.Length
         $gitCursorPosition = $cursorPosition + $offset
         if ($gitCursorPosition -lt 0) { $gitCursorPosition = 0 }
         if ($gitCursorPosition -gt $gitLine.Length) { $gitCursorPosition = $gitLine.Length }
+
+        if ($primarySubCommand -eq 'worktree' -and $wordToComplete -notlike '-*') {
+            $worktreeCompletions = Get-GitWorktreePathCompletions `
+                -CommandName $commandName `
+                -Line $line `
+                -WordToComplete $wordToComplete
+            if ($worktreeCompletions -and $worktreeCompletions.Count -gt 0) {
+                return $worktreeCompletions
+            }
+        }
 
         # Delegate to native completion for `git <subcommand> ...`.
         # This preserves completion for long options (e.g. --track, --detach)
         # and other git-specific argument completion behavior.
         try {
-            $nativeCompletion = [System.Management.Automation.CommandCompletion]::CompleteInput(
-                $gitLine,
-                $gitCursorPosition,
-                $null
-            )
-            if ($null -ne $nativeCompletion -and
-                $null -ne $nativeCompletion.CompletionMatches -and
-                $nativeCompletion.CompletionMatches.Count -gt 0) {
+                $nativeCompletion = [System.Management.Automation.CommandCompletion]::CompleteInput(
+                    $gitLine,
+                    $gitCursorPosition,
+                    $null
+                )
+                if ($null -ne $nativeCompletion -and
+                    $null -ne $nativeCompletion.CompletionMatches -and
+                    $nativeCompletion.CompletionMatches.Count -gt 0) {
                 $delegateMatches = @($nativeCompletion.CompletionMatches)
-                if ($subCommand -in @('checkout', 'switch', 'merge', 'rebase', 'branch', 'reset', 'revert')) {
+                if ($primarySubCommand -in @('checkout', 'switch', 'merge', 'rebase', 'branch', 'reset', 'revert')) {
                     $delegateMatches = @($nativeCompletion.CompletionMatches | ForEach-Object {
                         if ($null -eq $_) { return }
                         $completionText = $_.CompletionText
@@ -594,8 +753,18 @@ function Register-GitAliasCompletion {
                     })
                 }
 
+                if ($primarySubCommand -eq 'worktree' -and $wordToComplete -notlike '-*') {
+                    $worktreeCompletions = Get-GitWorktreePathCompletions `
+                        -CommandName $commandName `
+                        -Line $line `
+                        -WordToComplete $wordToComplete
+                    if ($worktreeCompletions -and $worktreeCompletions.Count -gt 0) {
+                        return $worktreeCompletions
+                    }
+                }
+
                 if ($wordToComplete -like '-*') {
-                    $optionCompletions = Get-GitLongOptionCompletions -SubCommand $subCommand -WordToComplete $wordToComplete
+                    $optionCompletions = Get-GitLongOptionCompletions -SubCommandLine $subCommandLine -WordToComplete $wordToComplete
                     if ($optionCompletions -and $optionCompletions.Count -gt 0) {
                         $combined = @()
                         $seen = @{}
@@ -619,13 +788,23 @@ function Register-GitAliasCompletion {
         }
 
         # Long option fallback when native completion isn't available.
-        $optionCompletions = Get-GitLongOptionCompletions -SubCommand $subCommand -WordToComplete $wordToComplete
+        $optionCompletions = Get-GitLongOptionCompletions -SubCommandLine $subCommandLine -WordToComplete $wordToComplete
         if ($optionCompletions -and $optionCompletions.Count -gt 0) {
             return $optionCompletions
         }
 
+        if ($primarySubCommand -eq 'worktree' -and $wordToComplete -notlike '-*') {
+            $worktreeCompletions = Get-GitWorktreePathCompletions `
+                -CommandName $commandName `
+                -Line $line `
+                -WordToComplete $wordToComplete
+            if ($worktreeCompletions -and $worktreeCompletions.Count -gt 0) {
+                return $worktreeCompletions
+            }
+        }
+
         # Final fallback when delegated completion is unavailable
-        if ($subCommand -in @('checkout', 'switch', 'merge', 'rebase', 'branch', 'reset', 'revert')) {
+        if ($primarySubCommand -in @('checkout', 'switch', 'merge', 'rebase', 'branch', 'reset', 'revert')) {
             try {
                 $branches = git branch -a --format='%(refname:short)' |
                             ForEach-Object { $_ -replace '^remotes/origin/', '' } |

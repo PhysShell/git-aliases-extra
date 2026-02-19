@@ -95,6 +95,8 @@ Describe 'git-aliases-extra module' {
         Get-Command Get-Git-Aliases -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command gfp -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command gsw -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gwt -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gwtr -ErrorAction Stop | Should -Not -BeNullOrEmpty
     }
 
     It 'Test-InGitRepo returns a boolean value outside or inside a repository' {
@@ -429,6 +431,87 @@ Describe 'gsw integration' {
 
             (Invoke-GitCommand -RepoPath $clonePath -Arguments @('rev-parse', '--abbrev-ref', 'HEAD')).Output | Should -Be '8695'
             (Invoke-GitCommand -RepoPath $clonePath -Arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}')).Output | Should -Be 'origin/8695'
+        } finally {
+            if (Test-Path $tempRoot) {
+                Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+Describe 'worktree aliases integration' {
+    It 'provides worktree shortcuts and lists worktrees via gwtl' -Skip:(-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("gwt-shortcuts-" + [guid]::NewGuid().Guid)
+        $repoPath = Join-Path $tempRoot 'repo'
+        $worktreePath = Join-Path $tempRoot 'repo-feature'
+
+        New-Item -ItemType Directory -Path $repoPath -Force | Out-Null
+        try {
+            Invoke-GitCommand -RepoPath $tempRoot -Arguments @('init', $repoPath) | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.email', 'test@example.com') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.name', 'Test User') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'commit.gpgsign', 'false') | Out-Null
+
+            Set-Content -Path (Join-Path $repoPath 'README.md') -Value 'root' -NoNewline -Encoding ascii
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('add', 'README.md') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('commit', '-m', 'init') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('branch', '-M', 'main') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('worktree', 'add', '-b', 'feature/worktree', $worktreePath) | Out-Null
+
+            Push-Location $repoPath
+            try {
+                $output = gwtl --porcelain | Out-String
+            } finally {
+                Pop-Location
+            }
+
+            $output | Should -Match 'worktree'
+            $output | Should -Match ([regex]::Escape((Split-Path -Path $worktreePath -Leaf)))
+        } finally {
+            if (Test-Path $tempRoot) {
+                Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    It 'completes worktree paths for gwtr and gwt remove' -Skip:(-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("gwt-complete-" + [guid]::NewGuid().Guid)
+        $repoPath = Join-Path $tempRoot 'repo'
+        $worktreePath = Join-Path $tempRoot 'repo-feature'
+
+        New-Item -ItemType Directory -Path $repoPath -Force | Out-Null
+        try {
+            Invoke-GitCommand -RepoPath $tempRoot -Arguments @('init', $repoPath) | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.email', 'test@example.com') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.name', 'Test User') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'commit.gpgsign', 'false') | Out-Null
+
+            Set-Content -Path (Join-Path $repoPath 'README.md') -Value 'root' -NoNewline -Encoding ascii
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('add', 'README.md') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('commit', '-m', 'init') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('branch', '-M', 'main') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('worktree', 'add', '-b', 'feature/worktree', $worktreePath) | Out-Null
+
+            $expectedLeaf = Split-Path -Path $worktreePath -Leaf
+
+            Push-Location $repoPath
+            try {
+                $gwtrLine = 'gwtr '
+                $gwtrResult = TabExpansion2 -inputScript $gwtrLine -cursorColumn $gwtrLine.Length
+
+                $gwtLine = 'gwt remove '
+                $gwtResult = TabExpansion2 -inputScript $gwtLine -cursorColumn $gwtLine.Length
+            } finally {
+                Pop-Location
+            }
+
+            $gwtrResult.CompletionMatches.Count | Should -BeGreaterThan 0
+            $gwtrTexts = @($gwtrResult.CompletionMatches | Select-Object -ExpandProperty CompletionText)
+            (@($gwtrTexts | Where-Object { $_ -like "*$expectedLeaf*" })).Count | Should -BeGreaterThan 0
+
+            $gwtResult.CompletionMatches.Count | Should -BeGreaterThan 0
+            $gwtTexts = @($gwtResult.CompletionMatches | Select-Object -ExpandProperty CompletionText)
+            (@($gwtTexts | Where-Object { $_ -like "*$expectedLeaf*" })).Count | Should -BeGreaterThan 0
         } finally {
             if (Test-Path $tempRoot) {
                 Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
