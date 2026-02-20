@@ -546,4 +546,176 @@ Describe 'worktree aliases integration' {
             }
         }
     }
+
+    It 'creates auto worktree path for branch-only gwta invocation' -Skip:(-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("gwta-auto-path-" + [guid]::NewGuid().Guid)
+        $repoPath = Join-Path $tempRoot 'repo'
+
+        New-Item -ItemType Directory -Path $repoPath -Force | Out-Null
+        try {
+            Invoke-GitCommand -RepoPath $tempRoot -Arguments @('init', $repoPath) | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.email', 'test@example.com') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.name', 'Test User') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'commit.gpgsign', 'false') | Out-Null
+
+            Set-Content -Path (Join-Path $repoPath 'README.md') -Value 'root' -NoNewline -Encoding ascii
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('add', 'README.md') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('commit', '-m', 'init') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('branch', '-M', 'main') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('branch', '8698') | Out-Null
+
+            Push-Location $repoPath
+            try {
+                gwta 8698 | Out-Null
+            } finally {
+                Pop-Location
+            }
+
+            $porcelainText = (Invoke-GitCommand -RepoPath $repoPath -Arguments @('worktree', 'list', '--porcelain')).Output
+            $worktreePaths = @(
+                $porcelainText -split "`r?`n" |
+                Where-Object { $_ -like 'worktree *' } |
+                ForEach-Object { $_.Substring(9).Trim() }
+            )
+
+            $repoFullPath = [IO.Path]::GetFullPath($repoPath)
+            $linkedWorktreePath = @($worktreePaths | Where-Object { [IO.Path]::GetFullPath($_) -ne $repoFullPath })[0]
+            $linkedWorktreePath | Should -Not -BeNullOrEmpty
+
+            $baseRoot = if ($env:GIT_ALIASES_EXTRA_WORKTREE_ROOT) {
+                $env:GIT_ALIASES_EXTRA_WORKTREE_ROOT
+            } elseif ($env:LOCALAPPDATA) {
+                Join-Path $env:LOCALAPPDATA 'git-worktrees'
+            } else {
+                Join-Path ([IO.Path]::GetTempPath()) 'git-worktrees'
+            }
+
+            $expectedRoot = Join-Path $baseRoot (Split-Path -Path $repoPath -Leaf)
+            [IO.Path]::GetFullPath($linkedWorktreePath) | Should -Match ([regex]::Escape([IO.Path]::GetFullPath($expectedRoot)))
+            (Invoke-GitCommand -RepoPath $linkedWorktreePath -Arguments @('rev-parse', '--abbrev-ref', 'HEAD')).Output | Should -Be '8698'
+        } finally {
+            if (Test-Path $tempRoot) {
+                Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    It 'creates auto worktree path for gwta -b invocation without explicit path' -Skip:(-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("gwta-auto-path-create-" + [guid]::NewGuid().Guid)
+        $repoPath = Join-Path $tempRoot 'repo'
+
+        New-Item -ItemType Directory -Path $repoPath -Force | Out-Null
+        try {
+            Invoke-GitCommand -RepoPath $tempRoot -Arguments @('init', $repoPath) | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.email', 'test@example.com') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.name', 'Test User') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'commit.gpgsign', 'false') | Out-Null
+
+            Set-Content -Path (Join-Path $repoPath 'README.md') -Value 'root' -NoNewline -Encoding ascii
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('add', 'README.md') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('commit', '-m', 'init') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('branch', '-M', 'main') | Out-Null
+
+            Push-Location $repoPath
+            try {
+                gwta -b feature/new-worktree | Out-Null
+            } finally {
+                Pop-Location
+            }
+
+            $porcelainText = (Invoke-GitCommand -RepoPath $repoPath -Arguments @('worktree', 'list', '--porcelain')).Output
+            $worktreePaths = @(
+                $porcelainText -split "`r?`n" |
+                Where-Object { $_ -like 'worktree *' } |
+                ForEach-Object { $_.Substring(9).Trim() }
+            )
+
+            $repoFullPath = [IO.Path]::GetFullPath($repoPath)
+            $linkedWorktreePath = @($worktreePaths | Where-Object { [IO.Path]::GetFullPath($_) -ne $repoFullPath })[0]
+            $linkedWorktreePath | Should -Not -BeNullOrEmpty
+
+            $baseRoot = if ($env:GIT_ALIASES_EXTRA_WORKTREE_ROOT) {
+                $env:GIT_ALIASES_EXTRA_WORKTREE_ROOT
+            } elseif ($env:LOCALAPPDATA) {
+                Join-Path $env:LOCALAPPDATA 'git-worktrees'
+            } else {
+                Join-Path ([IO.Path]::GetTempPath()) 'git-worktrees'
+            }
+
+            $expectedRoot = Join-Path $baseRoot (Split-Path -Path $repoPath -Leaf)
+            [IO.Path]::GetFullPath($linkedWorktreePath) | Should -Match ([regex]::Escape([IO.Path]::GetFullPath($expectedRoot)))
+            (Invoke-GitCommand -RepoPath $linkedWorktreePath -Arguments @('rev-parse', '--abbrev-ref', 'HEAD')).Output | Should -Be 'feature/new-worktree'
+        } finally {
+            if (Test-Path $tempRoot) {
+                Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    It 'completes branch names for gwta and gwt add branch positions (including after -f)' -Skip:(-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("gwta-branch-complete-" + [guid]::NewGuid().Guid)
+        $repoPath = Join-Path $tempRoot 'repo'
+
+        New-Item -ItemType Directory -Path $repoPath -Force | Out-Null
+        try {
+            Invoke-GitCommand -RepoPath $tempRoot -Arguments @('init', $repoPath) | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.email', 'test@example.com') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.name', 'Test User') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'commit.gpgsign', 'false') | Out-Null
+
+            Set-Content -Path (Join-Path $repoPath 'README.md') -Value 'root' -NoNewline -Encoding ascii
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('add', 'README.md') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('commit', '-m', 'init') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('branch', '-M', 'main') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('branch', 'feature/worktree') | Out-Null
+
+            Push-Location $repoPath
+            try {
+                $gwtaBranchLine = 'gwta -b '
+                $gwtaBranchResult = TabExpansion2 -inputScript $gwtaBranchLine -cursorColumn $gwtaBranchLine.Length
+
+                $gwtaStartPointLine = 'gwta ..\repo-feature '
+                $gwtaStartPointResult = TabExpansion2 -inputScript $gwtaStartPointLine -cursorColumn $gwtaStartPointLine.Length
+
+                $gwtaForceLine = 'gwta ..\repo-feature -f '
+                $gwtaForceResult = TabExpansion2 -inputScript $gwtaForceLine -cursorColumn $gwtaForceLine.Length
+
+                $gwtStartPointLine = 'gwt add ..\repo-feature '
+                $gwtStartPointResult = TabExpansion2 -inputScript $gwtStartPointLine -cursorColumn $gwtStartPointLine.Length
+
+                $gwtForceLine = 'gwt add ..\repo-feature -f '
+                $gwtForceResult = TabExpansion2 -inputScript $gwtForceLine -cursorColumn $gwtForceLine.Length
+            } finally {
+                Pop-Location
+            }
+
+            $gwtaBranchResult.CompletionMatches.Count | Should -BeGreaterThan 0
+            $gwtaBranchTexts = @($gwtaBranchResult.CompletionMatches | Select-Object -ExpandProperty CompletionText)
+            $gwtaBranchTexts | Should -Contain 'main'
+
+            $gwtaStartPointResult.CompletionMatches.Count | Should -BeGreaterThan 0
+            $gwtaStartPointTexts = @($gwtaStartPointResult.CompletionMatches | Select-Object -ExpandProperty CompletionText)
+            $gwtaStartPointTexts | Should -Contain 'main'
+            $gwtaStartPointTexts | Should -Contain 'feature/worktree'
+
+            $gwtStartPointResult.CompletionMatches.Count | Should -BeGreaterThan 0
+            $gwtStartPointTexts = @($gwtStartPointResult.CompletionMatches | Select-Object -ExpandProperty CompletionText)
+            $gwtStartPointTexts | Should -Contain 'main'
+            $gwtStartPointTexts | Should -Contain 'feature/worktree'
+
+            $gwtaForceResult.CompletionMatches.Count | Should -BeGreaterThan 0
+            $gwtaForceTexts = @($gwtaForceResult.CompletionMatches | Select-Object -ExpandProperty CompletionText)
+            $gwtaForceTexts | Should -Contain 'main'
+            $gwtaForceTexts | Should -Contain 'feature/worktree'
+
+            $gwtForceResult.CompletionMatches.Count | Should -BeGreaterThan 0
+            $gwtForceTexts = @($gwtForceResult.CompletionMatches | Select-Object -ExpandProperty CompletionText)
+            $gwtForceTexts | Should -Contain 'main'
+            $gwtForceTexts | Should -Contain 'feature/worktree'
+        } finally {
+            if (Test-Path $tempRoot) {
+                Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 }

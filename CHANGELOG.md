@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file.
 
 The format is based on Keep a Changelog and the project uses Semantic Versioning.
 
+## [0.1.3] - 2026-02-20
+
+### Added
+
+- Smart `gwta` auto-path mode for omitted path:
+  - `gwta <branch-or-start-point>`
+  - `gwta -b <new-branch>`
+- Branch completion for worktree-add flows:
+  - `gwta -b <TAB>`
+  - `gwta <path> <TAB>`
+  - `gwta <path> -f <TAB>`
+  - `gwt add <path> <TAB>`
+  - `gwt add <path> -f <TAB>`
+- Integration tests for `gwta` auto-path and branch completion, including `-f` scenarios.
+
+### Changed
+
+- README updated with dedicated `gwta` usage docs and examples.
+
 ## [0.1.2] - 2026-02-19
 
 ### Added

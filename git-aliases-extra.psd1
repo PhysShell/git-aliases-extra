@@ -1,6 +1,6 @@
 @{
     RootModule = 'git-aliases-extra.psm1'
-    ModuleVersion = '0.1.0'
+    ModuleVersion = '0.1.3'
     GUID = 'a5c2859e-7dce-4853-9db5-8cb7927dbdda'
     Author = 'PhysShell'
     CompanyName = ''

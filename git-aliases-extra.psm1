@@ -174,6 +174,141 @@ function Convert-ToPowerShellPathCompletionText {
     return $PathValue
 }
 
+function Convert-ToWorktreePathSegment {
+    param(
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    if ($null -eq $Text) {
+        $Text = ''
+    }
+
+    $segment = $Text.Trim("'", '"').Trim()
+    $segment = $segment -replace '[\\/]+', '-'
+    $segment = $segment -replace '[<>:"|?*]', '-'
+    $segment = $segment.Trim('.', ' ')
+
+    if ([string]::IsNullOrWhiteSpace($segment)) {
+        return 'worktree'
+    }
+
+    return $segment
+}
+
+function Get-GitWorktreeAutoRoot {
+    if ($env:GIT_ALIASES_EXTRA_WORKTREE_ROOT) {
+        $root = $env:GIT_ALIASES_EXTRA_WORKTREE_ROOT
+    } elseif ($env:LOCALAPPDATA) {
+        $root = Join-Path $env:LOCALAPPDATA 'git-worktrees'
+    } else {
+        $root = Join-Path ([IO.Path]::GetTempPath()) 'git-worktrees'
+    }
+
+    if (-not (Test-Path -LiteralPath $root)) {
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+    }
+
+    try {
+        $topLevel = (& git rev-parse --show-toplevel 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -eq 0 -and $topLevel) {
+            $repoSegment = Convert-ToWorktreePathSegment -Text (Split-Path -Path $topLevel -Leaf)
+            $root = Join-Path $root $repoSegment
+            if (-not (Test-Path -LiteralPath $root)) {
+                New-Item -ItemType Directory -Path $root -Force | Out-Null
+            }
+        }
+    } catch {
+        Write-Verbose ("Get-GitWorktreeAutoRoot fallback used: {0}" -f $_.Exception.Message)
+    }
+
+    return (Resolve-Path -LiteralPath $root | Select-Object -ExpandProperty Path -First 1)
+}
+
+function Get-GitWorktreeAutoPath {
+    param(
+        [AllowEmptyString()]
+        [string]$Hint
+    )
+
+    $root = Get-GitWorktreeAutoRoot
+    $baseName = Convert-ToWorktreePathSegment -Text $Hint
+    $candidate = Join-Path $root $baseName
+    $suffix = 2
+
+    while (Test-Path -LiteralPath $candidate) {
+        $candidate = Join-Path $root ("{0}-{1}" -f $baseName, $suffix)
+        $suffix++
+    }
+
+    return $candidate
+}
+
+function Test-LooksLikeWorktreePathToken {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Token
+    )
+
+    $trimmed = $Token.Trim("'", '"')
+    if ([string]::IsNullOrWhiteSpace($trimmed)) {
+        return $false
+    }
+
+    if ($trimmed -match '^[A-Za-z]:[\\/]') { return $true }
+    if ($trimmed.StartsWith('.\') -or $trimmed.StartsWith('..\')) { return $true }
+    if ($trimmed.StartsWith('./') -or $trimmed.StartsWith('../')) { return $true }
+    if ($trimmed.StartsWith('\') -or $trimmed.StartsWith('/')) { return $true }
+    if ($trimmed.StartsWith('~\') -or $trimmed.StartsWith('~/')) { return $true }
+    if ($trimmed.Contains('\')) { return $true }
+    if (Test-Path -LiteralPath $trimmed) { return $true }
+
+    return $false
+}
+
+function Get-GitBranchCompletions {
+    param(
+        [AllowEmptyString()]
+        [string]$WordToComplete
+    )
+
+    if (-not (Test-InGitRepo)) {
+        return @()
+    }
+
+    $prefix = $WordToComplete.Trim("'", '"')
+    if ($prefix.StartsWith('`')) {
+        $prefix = $prefix.Substring(1)
+    }
+
+    try {
+        $branches = @(
+            git branch -a --format='%(refname:short)' |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { $_ -replace '^remotes/origin/', '' } |
+            Where-Object { $_ -ne 'HEAD' } |
+            Sort-Object -Unique
+        )
+
+        if (-not [string]::IsNullOrWhiteSpace($prefix)) {
+            $branches = @($branches | Where-Object { $_ -like "$prefix*" })
+        }
+
+        if (-not $branches -or $branches.Count -eq 0) {
+            return @()
+        }
+
+        return @($branches | ForEach-Object {
+            $branchName = [string]$_
+            $safeText = Convert-ToPowerShellBranchCompletionText -BranchName $branchName
+            [System.Management.Automation.CompletionResult]::new($safeText, $branchName, 'ParameterValue', $branchName)
+        })
+    } catch {
+        return @()
+    }
+}
+
 function Get-GitWorktreePaths {
     if (-not (Test-InGitRepo)) {
         return @()
@@ -291,6 +426,118 @@ function Get-GitWorktreePathCompletions {
             "git worktree path: $pathValue"
         )
     })
+}
+
+function Get-GitWorktreeAddBranchCompletions {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CommandName,
+        [Parameter(Mandatory = $true)]
+        [string]$Line,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$WordToComplete
+    )
+
+    $tokens = $null
+    $errors = $null
+    [System.Management.Automation.Language.Parser]::ParseInput($Line, [ref]$tokens, [ref]$errors) | Out-Null
+    $tokenTexts = @(
+        $tokens |
+        Where-Object { $_.Kind.ToString() -notin @('EndOfInput', 'NewLine') } |
+        ForEach-Object { $_.Text }
+    )
+
+    if ($tokenTexts.Count -eq 0) {
+        return @()
+    }
+
+    $argumentTokens = @()
+    switch ($CommandName) {
+        'gwta' {
+            if ($tokenTexts.Count -gt 1) {
+                $argumentTokens = @($tokenTexts[1..($tokenTexts.Count - 1)])
+            }
+        }
+        'gwt' {
+            if ($tokenTexts.Count -lt 2 -or $tokenTexts[1] -ne 'add') {
+                return @()
+            }
+            if ($tokenTexts.Count -gt 2) {
+                $argumentTokens = @($tokenTexts[2..($tokenTexts.Count - 1)])
+            }
+        }
+        default {
+            return @()
+        }
+    }
+
+    $endsWithWhitespace = $Line -match '\s$'
+    $analysisTokens = @($argumentTokens)
+    if (-not $endsWithWhitespace -and $analysisTokens.Count -gt 0) {
+        $analysisTokens = @($analysisTokens[0..($analysisTokens.Count - 2)])
+    }
+
+    $expectValueFor = ''
+    $positionalCount = 0
+    foreach ($token in $analysisTokens) {
+        if ($expectValueFor) {
+            $expectValueFor = ''
+            continue
+        }
+
+        switch ($token) {
+            '-b' { $expectValueFor = 'branch'; continue }
+            '-B' { $expectValueFor = 'branch'; continue }
+            '--reason' { $expectValueFor = 'reason'; continue }
+        }
+
+        if ($token.StartsWith('-')) {
+            continue
+        }
+
+        $positionalCount++
+    }
+
+    if ($expectValueFor -eq 'branch' -or $positionalCount -ge 1) {
+        return Get-GitBranchCompletions -WordToComplete $WordToComplete
+    }
+
+    return @()
+}
+
+function Get-GitWorktreeCompletions {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$CommandName,
+        [Parameter(Mandatory = $true)]
+        [string]$Line,
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$WordToComplete
+    )
+
+    if ($WordToComplete -like '-*') {
+        return @()
+    }
+
+    $pathCompletions = Get-GitWorktreePathCompletions `
+        -CommandName $CommandName `
+        -Line $Line `
+        -WordToComplete $WordToComplete
+    if ($pathCompletions -and $pathCompletions.Count -gt 0) {
+        return $pathCompletions
+    }
+
+    $branchCompletions = Get-GitWorktreeAddBranchCompletions `
+        -CommandName $CommandName `
+        -Line $Line `
+        -WordToComplete $WordToComplete
+    if ($branchCompletions -and $branchCompletions.Count -gt 0) {
+        return $branchCompletions
+    }
+
+    return @()
 }
 
 function Get-GitAliasEntries {
@@ -450,7 +697,88 @@ function gdnolock { git diff @args ":(exclude)package-lock.json" ":(exclude)*.lo
 function gdv    { git diff -w @args | Out-String | less }
 function gfo    { git fetch origin @args }
 function gwt    { git worktree @args }
-function gwta   { git worktree add @args }
+function gwta {
+    [CmdletBinding()]
+    param(
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$rest
+    )
+
+    if ($null -eq $rest) {
+        $rest = @()
+    }
+
+    if (-not (Test-InGitRepo)) {
+        git worktree add @rest
+        return
+    }
+
+    $positionalIndices = @()
+    $positionalTokens = @()
+    $createBranchName = ''
+    $hasCreateBranchOption = $false
+    $expectValueFor = ''
+
+    for ($i = 0; $i -lt $rest.Count; $i++) {
+        $token = [string]$rest[$i]
+        if ($expectValueFor) {
+            if ($expectValueFor -eq 'create-branch') {
+                $createBranchName = $token.Trim("'", '"')
+                $hasCreateBranchOption = $true
+            }
+            $expectValueFor = ''
+            continue
+        }
+
+        switch ($token) {
+            '-b' { $expectValueFor = 'create-branch'; continue }
+            '-B' { $expectValueFor = 'create-branch'; continue }
+            '--reason' { $expectValueFor = 'reason'; continue }
+        }
+
+        if ($token.StartsWith('-')) {
+            continue
+        }
+
+        $positionalIndices += $i
+        $positionalTokens += $token
+    }
+
+    $autoPathHint = ''
+    $insertBeforeIndex = -1
+
+    # Convenience modes:
+    # - `gwta <branch>` creates a worktree under LOCALAPPDATA\git-worktrees\<repo>\<branch>.
+    # - `gwta -b <new-branch>` does the same when path is omitted.
+    if ($hasCreateBranchOption -and $positionalTokens.Count -eq 0) {
+        $autoPathHint = if ($createBranchName) { $createBranchName } else { Get-CurrentBranch }
+        $insertBeforeIndex = $rest.Count
+    } elseif (-not $hasCreateBranchOption -and
+              $positionalTokens.Count -eq 1 -and
+              -not (Test-LooksLikeWorktreePathToken -Token $positionalTokens[0])) {
+        $autoPathHint = $positionalTokens[0]
+        $insertBeforeIndex = [int]$positionalIndices[0]
+    }
+
+    if (-not $autoPathHint) {
+        git worktree add @rest
+        return
+    }
+
+    $autoPath = Get-GitWorktreeAutoPath -Hint $autoPathHint
+    $prefixArgs = @()
+    $suffixArgs = @()
+    if ($insertBeforeIndex -gt 0) {
+        $prefixArgs = @($rest[0..($insertBeforeIndex - 1)])
+    }
+    if ($insertBeforeIndex -lt $rest.Count) {
+        $suffixArgs = @($rest[$insertBeforeIndex..($rest.Count - 1)])
+    }
+
+    $gitArgs = @('worktree', 'add') + $prefixArgs + @($autoPath) + $suffixArgs
+    Write-Verbose ("gwta auto path: {0}" -f $autoPath)
+    & git @gitArgs
+}
 function gwtl   { git worktree list @args }
 function gwtm   { git worktree move @args }
 function gwtr   { git worktree remove @args }
@@ -713,7 +1041,7 @@ function Register-GitAliasCompletion {
         if ($gitCursorPosition -gt $gitLine.Length) { $gitCursorPosition = $gitLine.Length }
 
         if ($primarySubCommand -eq 'worktree' -and $wordToComplete -notlike '-*') {
-            $worktreeCompletions = Get-GitWorktreePathCompletions `
+            $worktreeCompletions = Get-GitWorktreeCompletions `
                 -CommandName $commandName `
                 -Line $line `
                 -WordToComplete $wordToComplete
@@ -754,7 +1082,7 @@ function Register-GitAliasCompletion {
                 }
 
                 if ($primarySubCommand -eq 'worktree' -and $wordToComplete -notlike '-*') {
-                    $worktreeCompletions = Get-GitWorktreePathCompletions `
+                    $worktreeCompletions = Get-GitWorktreeCompletions `
                         -CommandName $commandName `
                         -Line $line `
                         -WordToComplete $wordToComplete
@@ -794,7 +1122,7 @@ function Register-GitAliasCompletion {
         }
 
         if ($primarySubCommand -eq 'worktree' -and $wordToComplete -notlike '-*') {
-            $worktreeCompletions = Get-GitWorktreePathCompletions `
+            $worktreeCompletions = Get-GitWorktreeCompletions `
                 -CommandName $commandName `
                 -Line $line `
                 -WordToComplete $wordToComplete

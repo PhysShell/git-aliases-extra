@@ -83,6 +83,28 @@ Default output order:
 - `base` group second
 - alphabetical order inside each group
 
+## Worktree add (`gwta`)
+
+`gwta` is a smart wrapper for `git worktree add`.
+
+Auto path mode (no path provided):
+
+```powershell
+gwta 8698
+gwta -b feature/new-worktree
+```
+
+By default, worktrees are created under:
+- `%LOCALAPPDATA%\git-worktrees\<repo-name>\...`
+- override root with `GIT_ALIASES_EXTRA_WORKTREE_ROOT`
+
+Branch completion (Tab) works for:
+- `gwta -b <TAB>`
+- `gwta <path> <TAB>`
+- `gwta <path> -f <TAB>`
+- `gwt add <path> <TAB>`
+- `gwt add <path> -f <TAB>`
+
 ## Aliases
 
 | Alias | Command | Source |
@@ -95,21 +117,21 @@ Default output order:
 | gdt | git diff-tree --no-commit-id --name-only -r @args | extra |
 | gdv | git diff -w @args \| Out-String \| less | extra |
 | gfo | git fetch origin @args | extra |
-| gfp | Create `format-patch` mbox (`--cover-letter --stat --stdout`) from `<remote>/<target>..HEAD`. [source](./git-aliases-extra.psm1#L519) | extra |
-| ghash | Return commit hash for HEAD or HEAD~N (`-Short` supported). [source](./git-aliases-extra.psm1#L486) | extra |
+| gfp | Create `format-patch` mbox (`--cover-letter --stat --stdout`) from `<remote>/<target>..HEAD`. [source](./git-aliases-extra.psm1#L848) | extra |
+| ghash | Return commit hash for HEAD or HEAD~N (`-Short` supported). [source](./git-aliases-extra.psm1#L815) | extra |
 | glp | param([string]$format) if($format){ git log --pretty=$format } else { git log } | extra |
 | gmtl | git mergetool --no-prompt @args | extra |
 | gmtlvim | git mergetool --no-prompt --tool=vimdiff @args | extra |
 | grl | git reflog @args | extra |
 | grsh | git reset --soft HEAD~1 | extra |
-| gsw | Switch to local branch or create tracking branch for remote-only target. [source](./git-aliases-extra.psm1#L594) | extra |
+| gsw | Switch to local branch or create tracking branch for remote-only target. [source](./git-aliases-extra.psm1#L923) | extra |
 | gswc | git switch -c @args | extra |
 | gtl | param($p='') git tag --sort=-v:refname -n -l "$p*" | extra |
 | gtv | git tag \| Sort-Object { $_ -as [version] } | extra |
 | gunwip | if (git log -n 1 \| Select-String -Quiet -- "--wip--") { git reset HEAD~1 } | extra |
 | gwip | git add -A; git rm (git ls-files --deleted) 2>$null; git commit --no-verify --no-gpg-sign -m "--wip-- [skip ci]" | extra |
 | gwt | git worktree @args | extra |
-| gwta | git worktree add @args | extra |
+| gwta | Add worktree with smart defaults: supports auto path when omitted (`%LOCALAPPDATA%\\git-worktrees\\<repo>\\...`) and branch-aware completion for `-b/-B` and start-point positions. [source](./git-aliases-extra.psm1#L700) | extra |
 | gwtl | git worktree list @args | extra |
 | gwtm | git worktree move @args | extra |
 | gwtp | git worktree prune @args | extra |
