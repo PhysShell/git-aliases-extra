@@ -4,6 +4,19 @@ All notable changes to this project are documented in this file.
 
 The format is based on Keep a Changelog and the project uses Semantic Versioning.
 
+## [0.1.5] - 2026-03-04
+
+### Changed
+
+- Branch completion now supports both match strategies:
+  - priority 1: branch names that start with the typed fragment (`StartsWith`);
+  - priority 2: branch names that contain the typed fragment anywhere (`Contains`).
+- `gsw` and other branch-oriented alias completions now use the same prioritized branch selection, including native-completion delegation paths.
+
+### Added
+
+- Integration test coverage for branch completion ordering to verify that `StartsWith` results are listed before `Contains` results.
+
 ## [0.1.4] - 2026-02-20
 
 ### Fixed

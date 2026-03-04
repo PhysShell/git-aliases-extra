@@ -70,6 +70,76 @@ function Convert-ToPowerShellBranchCompletionText {
     return $BranchName
 }
 
+function Get-GitBranchCompletionPrefix {
+    param(
+        [AllowEmptyString()]
+        [string]$WordToComplete
+    )
+
+    $prefix = $WordToComplete.Trim("'", '"')
+    if ($prefix.StartsWith('`')) {
+        $prefix = $prefix.Substring(1)
+    }
+
+    return $prefix
+}
+
+function Get-GitBranchNames {
+    if (-not (Test-InGitRepo)) {
+        return @()
+    }
+
+    try {
+        return @(
+            git branch -a --format='%(refname:short)' |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+            ForEach-Object { $_ -replace '^remotes/origin/', '' } |
+            Where-Object { $_ -ne 'HEAD' } |
+            Sort-Object -Unique
+        )
+    } catch {
+        return @()
+    }
+}
+
+function Select-GitBranchesForCompletion {
+    param(
+        [AllowEmptyCollection()]
+        [string[]]$Branches,
+        [AllowEmptyString()]
+        [string]$Prefix
+    )
+
+    if (-not $Branches -or $Branches.Count -eq 0) {
+        return @()
+    }
+
+    if ([string]::IsNullOrWhiteSpace($Prefix)) {
+        return @($Branches)
+    }
+
+    $startsWithMatches = @()
+    $containsMatches = @()
+    foreach ($entry in $Branches) {
+        $branchName = [string]$entry
+        if ([string]::IsNullOrWhiteSpace($branchName)) {
+            continue
+        }
+
+        if ($branchName.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $startsWithMatches += $branchName
+            continue
+        }
+
+        if ($branchName.IndexOf($Prefix, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            $containsMatches += $branchName
+        }
+    }
+
+    return @($startsWithMatches + $containsMatches)
+}
+
 function Get-GitLongOptionCompletions {
     param(
         [Parameter(Mandatory = $true)]
@@ -272,28 +342,11 @@ function Get-GitBranchCompletions {
         [string]$WordToComplete
     )
 
-    if (-not (Test-InGitRepo)) {
-        return @()
-    }
-
-    $prefix = $WordToComplete.Trim("'", '"')
-    if ($prefix.StartsWith('`')) {
-        $prefix = $prefix.Substring(1)
-    }
-
     try {
-        $branches = @(
-            git branch -a --format='%(refname:short)' |
-            ForEach-Object { $_.Trim() } |
-            Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-            ForEach-Object { $_ -replace '^remotes/origin/', '' } |
-            Where-Object { $_ -ne 'HEAD' } |
-            Sort-Object -Unique
-        )
-
-        if (-not [string]::IsNullOrWhiteSpace($prefix)) {
-            $branches = @($branches | Where-Object { $_ -like "$prefix*" })
-        }
+        $prefix = Get-GitBranchCompletionPrefix -WordToComplete $WordToComplete
+        $branches = Select-GitBranchesForCompletion `
+            -Branches (Get-GitBranchNames) `
+            -Prefix $prefix
 
         if (-not $branches -or $branches.Count -eq 0) {
             return @()
@@ -1091,6 +1144,14 @@ function Register-GitAliasCompletion {
                     }
                 }
 
+                if ($primarySubCommand -in @('checkout', 'switch', 'merge', 'rebase', 'branch', 'reset', 'revert') -and
+                    $wordToComplete -notlike '-*') {
+                    $branchCompletions = Get-GitBranchCompletions -WordToComplete $wordToComplete
+                    if ($branchCompletions -and $branchCompletions.Count -gt 0) {
+                        return $branchCompletions
+                    }
+                }
+
                 if ($wordToComplete -like '-*') {
                     $optionCompletions = Get-GitLongOptionCompletions -SubCommandLine $subCommandLine -WordToComplete $wordToComplete
                     if ($optionCompletions -and $optionCompletions.Count -gt 0) {
@@ -1134,16 +1195,9 @@ function Register-GitAliasCompletion {
         # Final fallback when delegated completion is unavailable
         if ($primarySubCommand -in @('checkout', 'switch', 'merge', 'rebase', 'branch', 'reset', 'revert')) {
             try {
-                $branches = git branch -a --format='%(refname:short)' |
-                            ForEach-Object { $_ -replace '^remotes/origin/', '' } |
-                            Sort-Object -Unique |
-                            Where-Object { $_ -like "$wordToComplete*" }
-                if ($branches) {
-                    return $branches | ForEach-Object {
-                        $branchName = $_
-                        $safeText = Convert-ToPowerShellBranchCompletionText -BranchName $branchName
-                        [System.Management.Automation.CompletionResult]::new($safeText, $branchName, 'ParameterValue', $branchName)
-                    }
+                $branchCompletions = Get-GitBranchCompletions -WordToComplete $wordToComplete
+                if ($branchCompletions -and $branchCompletions.Count -gt 0) {
+                    return $branchCompletions
                 }
             } catch {
                 return @()

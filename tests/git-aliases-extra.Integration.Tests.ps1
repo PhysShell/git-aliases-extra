@@ -341,6 +341,58 @@ Describe 'gsw integration' {
         $completionTexts | Should -Contain '--track'
     }
 
+    It 'prioritizes starts-with matches before contains matches for gsw branch completion' -Skip:(-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("gsw-contains-complete-" + [guid]::NewGuid().Guid)
+        $repoPath = Join-Path $tempRoot 'repo'
+
+        New-Item -ItemType Directory -Path $repoPath -Force | Out-Null
+        try {
+            Invoke-GitCommand -RepoPath $tempRoot -Arguments @('init', $repoPath) | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.email', 'test@example.com') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.name', 'Test User') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'commit.gpgsign', 'false') | Out-Null
+
+            Set-Content -Path (Join-Path $repoPath 'README.md') -Value 'root' -NoNewline -Encoding ascii
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('add', 'README.md') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('commit', '-m', 'init') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('branch', '-M', 'main') | Out-Null
+
+            $startsWithBranches = @('br-alpha', 'br-zulu')
+            $containsBranches = @('feature/br-mid', 'release-abr')
+            foreach ($branchName in @($startsWithBranches + $containsBranches)) {
+                Invoke-GitCommand -RepoPath $repoPath -Arguments @('branch', $branchName) | Out-Null
+            }
+
+            Push-Location $repoPath
+            try {
+                $line = 'gsw br'
+                $result = TabExpansion2 -inputScript $line -cursorColumn $line.Length
+            } finally {
+                Pop-Location
+            }
+
+            $result.CompletionMatches.Count | Should -BeGreaterThan 0
+            $completionTexts = @($result.CompletionMatches | Select-Object -ExpandProperty CompletionText)
+
+            foreach ($branchName in $startsWithBranches) {
+                $completionTexts | Should -Contain $branchName
+            }
+            foreach ($branchName in $containsBranches) {
+                $completionTexts | Should -Contain $branchName
+            }
+
+            $startsWithIndexes = @($startsWithBranches | ForEach-Object { [array]::IndexOf($completionTexts, $_) })
+            $containsIndexes = @($containsBranches | ForEach-Object { [array]::IndexOf($completionTexts, $_) })
+
+            (($startsWithIndexes | Measure-Object -Maximum).Maximum) |
+                Should -BeLessThan (($containsIndexes | Measure-Object -Minimum).Minimum)
+        } finally {
+            if (Test-Path $tempRoot) {
+                Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
     It 'completes long options for gco alias from git-aliases module' -Skip:(-not (Get-Command git -ErrorAction SilentlyContinue) -or -not $script:HasGcoAlias) {
         Push-Location $script:RepoRoot
         try {
