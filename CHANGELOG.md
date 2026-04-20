@@ -4,6 +4,56 @@ All notable changes to this project are documented in this file.
 
 The format is based on Keep a Changelog and the project uses Semantic Versioning.
 
+## [0.1.7] - 2026-04-20
+
+### Added
+
+- Enhanced not-merged branch inspection:
+  - `Get-BranchesNotMergedToDevelopDetails` with author, unique-commit count, insertion/deletion stats, changed-file count, and truncated changed-file preview.
+  - `gbnmdi` interactive browser (arrow-key navigation + Enter selection) with detail views:
+    - `Commits` (default)
+    - `Changes` (diff stat + name-status)
+    - `Patch` (full patch output)
+- Extended `gbnmd` and `gbnmdr` with:
+  - `-Detailed`
+  - `-Interactive`
+  - `-View Commits|Changes|Patch`
+  - optional date filters: `-Since`, `-LastDays`
+- Integration test coverage for detailed not-merged branch output and branch-stability checks (current branch remains unchanged).
+
+### Changed
+
+- Not-merged branch data collection now keeps stable ref metadata (`Ref`, `BaseRef`) to support richer visual inspection without branch switching.
+- README expanded with interactive usage and enriched table examples for `gbnmd`/`gbnmdr`/`gbnmdi`.
+
+### Fixed
+
+- Windows PowerShell 5.1 import compatibility for BOM-less module sources:
+  - mojibake detection now uses ASCII-only Unicode escape sequences in regex literals;
+  - the module source remains ASCII-only to avoid ANSI parsing regressions.
+- `PSScriptAnalyzer` warning cleanup for `Convert-FromGitMojibake` by replacing an empty catch block with verbose diagnostic output.
+
+## [0.1.6] - 2026-03-13
+
+### Added
+
+- Branch visibility helpers:
+  - `Get-BranchesNotMergedToDevelop` with `-Since`, `-LastDays`, `-BaseBranch`, and `-RemoteOnly` parameters.
+  - compatibility wrapper `Get-BranchesNotMergedToDevelopSinceDate`.
+  - shortcut alias `gbnms` for `Get-BranchesNotMergedToDevelop`.
+- New branch aliases:
+  - `gbnmd` -> `git branch --no-merged <base> --sort=-committerdate` (default base: `develop`)
+  - `gbnmdr` -> same command with `-r`
+  - `gbsc` -> `git branch --show-current`
+- Integration tests for:
+  - `gbsc` current-branch output;
+  - `gbnmd`/`gbnmdr` filtering and ordering;
+  - date-based filtering (`Since`/`LastDays`) and remote-only behavior for `Get-BranchesNotMergedToDevelop`.
+
+### Changed
+
+- README documentation expanded with a dedicated section for not-merged branch helpers and usage examples.
+
 ## [0.1.5] - 2026-03-04
 
 ### Changed

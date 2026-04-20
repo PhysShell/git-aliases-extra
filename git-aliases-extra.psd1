@@ -1,6 +1,6 @@
 @{
     RootModule = 'git-aliases-extra.psm1'
-    ModuleVersion = '0.1.5'
+    ModuleVersion = '0.1.7'
     GUID = 'a5c2859e-7dce-4853-9db5-8cb7927dbdda'
     Author = 'PhysShell'
     CompanyName = ''
@@ -45,9 +45,16 @@
         'gfp',
         'gsw',
         'gswc',
+        'Get-BranchesNotMergedToDevelop',
+        'Get-BranchesNotMergedToDevelopSinceDate',
+        'Get-BranchesNotMergedToDevelopDetails',
+        'gbnmd',
+        'gbnmdr',
+        'gbnmdi',
+        'gbsc',
         'Register-GitAliasCompletion'
     )
-    AliasesToExport = @('gum', 'gur', 'gh')
+    AliasesToExport = @('gum', 'gur', 'gh', 'gbnms')
     CmdletsToExport = @()
     VariablesToExport = '*'
     RequiredModules = @(

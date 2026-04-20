@@ -1017,12 +1017,778 @@ function gsw {
 
 function gswc    { git switch -c @args }
 
+function Resolve-GitBaseBranchRef {
+    [CmdletBinding()]
+    param(
+        [string]$BaseBranch = 'develop'
+    )
+
+    $baseBranchTrimmed = if ($null -eq $BaseBranch) { '' } else { $BaseBranch.Trim() }
+    if ([string]::IsNullOrWhiteSpace($baseBranchTrimmed)) {
+        throw "BaseBranch cannot be empty."
+    }
+
+    $baseRefCandidates = if ($baseBranchTrimmed.StartsWith('refs/')) {
+        @($baseBranchTrimmed)
+    } else {
+        @("refs/heads/$baseBranchTrimmed", "refs/remotes/origin/$baseBranchTrimmed")
+    }
+
+    $baseRef = $null
+    foreach ($candidate in $baseRefCandidates) {
+        if (Test-GitRefExists $candidate) {
+            $baseRef = $candidate
+            break
+        }
+    }
+
+    if (-not $baseRef) {
+        throw ("Base branch ref '{0}' was not found. Checked: {1}" -f $baseBranchTrimmed, ($baseRefCandidates -join ', '))
+    }
+
+    [PSCustomObject]@{
+        BaseBranch = $baseBranchTrimmed
+        BaseRef    = $baseRef
+    }
+}
+
+function Get-GitBranchRefFromShortName {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()]
+        [string]$BranchName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($BranchName)) {
+        return ''
+    }
+
+    if ($BranchName.StartsWith('origin/')) {
+        return "refs/remotes/$BranchName"
+    }
+
+    return "refs/heads/$BranchName"
+}
+
+function Get-GitShortStatMetrics {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()]
+        [string]$ShortStatText
+    )
+
+    $files = 0
+    $insertions = 0
+    $deletions = 0
+    $text = if ($null -eq $ShortStatText) { '' } else { $ShortStatText.Trim() }
+
+    if ($text -match '(\d+)\s+files?\s+changed') {
+        $files = [int]$matches[1]
+    }
+    if ($text -match '(\d+)\s+insertions?\(\+\)') {
+        $insertions = [int]$matches[1]
+    }
+    if ($text -match '(\d+)\s+deletions?\(-\)') {
+        $deletions = [int]$matches[1]
+    }
+
+    [PSCustomObject]@{
+        Files      = $files
+        Insertions = $insertions
+        Deletions  = $deletions
+    }
+}
+
+function Get-GitChangedFilesPreview {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyCollection()]
+        [string[]]$Files,
+        [ValidateRange(1, 200)]
+        [int]$MaxFiles = 8
+    )
+
+    $cleanFiles = @(
+        $Files |
+        ForEach-Object { [string]$_ } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+
+    if ($cleanFiles.Count -eq 0) {
+        return ''
+    }
+
+    if ($cleanFiles.Count -le $MaxFiles) {
+        return ($cleanFiles -join ', ')
+    }
+
+    $headFiles = @($cleanFiles[0..($MaxFiles - 1)])
+    $remaining = $cleanFiles.Count - $MaxFiles
+    return ("{0}, +{1} more" -f ($headFiles -join ', '), $remaining)
+}
+
+function Get-GitDisplaySnippet {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()]
+        [string]$Text,
+        [ValidateRange(1, 500)]
+        [int]$MaxLength = 40
+    )
+
+    $value = if ($null -eq $Text) { '' } else { [string]$Text }
+    if ($value.Length -le $MaxLength) {
+        return $value
+    }
+
+    if ($MaxLength -le 3) {
+        return $value.Substring(0, $MaxLength)
+    }
+
+    return $value.Substring(0, $MaxLength - 3) + '...'
+}
+
+function Convert-FromGitMojibake {
+    [CmdletBinding()]
+    param(
+        [AllowEmptyString()]
+        [string]$Text
+    )
+
+    if ($null -eq $Text) {
+        return ''
+    }
+
+    $value = [string]$Text
+    # Keep regex patterns ASCII-only because Windows PowerShell 5.1 parses BOM-less modules as ANSI.
+    if ($value -notmatch '[\u00D0\u00D1\u2568\u2564]') {
+        return $value
+    }
+
+    $encodings = @()
+    try {
+        $encodings += [Console]::OutputEncoding
+    } catch {
+        Write-Verbose ("Console output encoding is unavailable: {0}" -f $_.Exception.Message)
+    }
+    $encodings += @(
+        [Text.Encoding]::GetEncoding(866),
+        [Text.Encoding]::GetEncoding(1251)
+    )
+
+    foreach ($encoding in $encodings) {
+        if ($null -eq $encoding) {
+            continue
+        }
+
+        try {
+            $bytes = $encoding.GetBytes($value)
+            $decoded = [Text.Encoding]::UTF8.GetString($bytes)
+            if ($decoded -match '[\u0410-\u044F\u0401\u0451]') {
+                return $decoded
+            }
+        } catch {
+            continue
+        }
+    }
+
+    return $value
+}
+
+function Get-BranchesNotMergedToDevelop {
+    [CmdletBinding()]
+    param(
+        [datetime]$Since,
+        [ValidateRange(0, 36500)]
+        [int]$LastDays = 0,
+        [string]$BaseBranch = 'develop',
+        [switch]$RemoteOnly
+    )
+
+    if (-not (Test-InGitRepo)) {
+        throw "Not a git repository."
+    }
+
+    if (-not $PSBoundParameters.ContainsKey('Since')) {
+        if ($LastDays -gt 0) {
+            $Since = (Get-Date).Date.AddDays(-$LastDays)
+        } else {
+            $Since = (Get-Date).Date
+        }
+    }
+
+    $resolvedBase = Resolve-GitBaseBranchRef -BaseBranch $BaseBranch
+    $baseRef = [string]$resolvedBase.BaseRef
+
+    $refs = if ($RemoteOnly) {
+        @('refs/remotes/origin')
+    } else {
+        @('refs/heads', 'refs/remotes/origin')
+    }
+
+    $rows = @(
+        git for-each-ref `
+            "--no-merged=$baseRef" `
+            '--sort=-committerdate' `
+            '--format=%(committerdate:unix)|%(refname:short)|%(refname)|%(objectname)' `
+            @refs
+    )
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "git for-each-ref failed."
+    }
+
+    foreach ($row in $rows) {
+        if (-not $row -or $row -match '\|origin/HEAD$') {
+            continue
+        }
+
+        $parts = $row -split '\|', 4
+        if ($parts.Count -lt 2) {
+            continue
+        }
+
+        try {
+            $commitUnix = [int64]$parts[0]
+            $commitDate = [DateTimeOffset]::FromUnixTimeSeconds($commitUnix).LocalDateTime
+        } catch {
+            continue
+        }
+
+        $branchName = Convert-FromGitMojibake -Text ([string]$parts[1])
+        $branchRef = if ($parts.Count -ge 3) { [string]$parts[2] } else { Get-GitBranchRefFromShortName -BranchName $branchName }
+        $branchTip = if ($parts.Count -ge 4) { [string]$parts[3] } else { '' }
+        if ([string]::IsNullOrWhiteSpace($branchName)) {
+            continue
+        }
+
+        if ($commitDate -ge $Since) {
+            [PSCustomObject]@{
+                Date      = $commitDate
+                Branch    = $branchName
+                Ref       = $branchRef
+                Tip       = $branchTip
+                BaseRef   = $baseRef
+                BaseBranch = $resolvedBase.BaseBranch
+            }
+        }
+    }
+}
+
+function Get-BranchesNotMergedToDevelopDetails {
+    [CmdletBinding()]
+    param(
+        [datetime]$Since,
+        [ValidateRange(0, 36500)]
+        [int]$LastDays = 0,
+        [string]$BaseBranch = 'develop',
+        [switch]$RemoteOnly,
+        [ValidateRange(1, 200)]
+        [int]$MaxFiles = 8
+    )
+
+    $hasSince = $PSBoundParameters.ContainsKey('Since')
+    if (-not $hasSince -and $LastDays -le 0) {
+        # Details view is primarily used by gbnmd/gbnmdr UI.
+        # Default to full not-merged list unless an explicit date filter is requested.
+        $Since = [datetime]::MinValue
+        $hasSince = $true
+    }
+
+    $branchArgs = @{
+        BaseBranch = $BaseBranch
+        RemoteOnly = $RemoteOnly
+        LastDays   = $LastDays
+    }
+    if ($hasSince) {
+        $branchArgs.Since = $Since
+    }
+
+    $rows = @(Get-BranchesNotMergedToDevelop @branchArgs)
+    if ($rows.Count -eq 0) {
+        return @()
+    }
+
+    $resolvedBase = Resolve-GitBaseBranchRef -BaseBranch $BaseBranch
+    $baseRef = [string]$resolvedBase.BaseRef
+
+    $details = foreach ($row in $rows) {
+        $branchName = Convert-FromGitMojibake -Text ([string]$row.Branch)
+        if ([string]::IsNullOrWhiteSpace($branchName)) {
+            continue
+        }
+
+        $branchRef = if ($row.PSObject.Properties.Name -contains 'Ref' -and $row.Ref) {
+            [string]$row.Ref
+        } else {
+            Get-GitBranchRefFromShortName -BranchName $branchName
+        }
+        $branchTip = if ($row.PSObject.Properties.Name -contains 'Tip' -and $row.Tip) {
+            [string]$row.Tip
+        } else {
+            ''
+        }
+        $branchTarget = if ($branchTip) { $branchTip } else { $branchRef }
+
+        $author = ''
+        $authorLine = git log -1 '--encoding=UTF-8' '--format=%an' $branchTarget | Select-Object -First 1
+        if ($LASTEXITCODE -eq 0 -and $authorLine) {
+            $author = (Convert-FromGitMojibake -Text ([string]$authorLine)).Trim()
+        }
+
+        $commitCount = 0
+        $commitCountRaw = git rev-list --count "$baseRef..$branchTarget" | Select-Object -First 1
+        $parsedCommitCount = 0
+        if ($LASTEXITCODE -eq 0 -and [int]::TryParse([string]$commitCountRaw, [ref]$parsedCommitCount)) {
+            $commitCount = $parsedCommitCount
+        }
+
+        $shortStat = (git diff --shortstat "$baseRef...$branchTarget" | Out-String).Trim()
+        $metrics = Get-GitShortStatMetrics -ShortStatText $shortStat
+
+        $changedFiles = @(
+            git -c core.quotepath=false diff --name-only "$baseRef...$branchTarget" |
+            ForEach-Object { Convert-FromGitMojibake -Text ([string]$_) } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        )
+        if ($LASTEXITCODE -ne 0) {
+            $changedFiles = @()
+        }
+
+        [PSCustomObject]@{
+            Date       = $row.Date
+            Branch     = $branchName
+            Author     = $author
+            Commits    = $commitCount
+            Insertions = [int]$metrics.Insertions
+            Deletions  = [int]$metrics.Deletions
+            Files      = [int]$metrics.Files
+            FilesPreview = Get-GitChangedFilesPreview -Files $changedFiles -MaxFiles $MaxFiles
+            Ref        = $branchRef
+            BaseRef    = $baseRef
+            BaseBranch = $resolvedBase.BaseBranch
+        }
+    }
+
+    return @($details)
+}
+
+function Get-BranchesNotMergedToDevelopSinceDate {
+    [CmdletBinding()]
+    param(
+        [datetime]$Since = (Get-Date).Date,
+        [string]$BaseBranch = 'develop',
+        [switch]$RemoteOnly
+    )
+
+    Get-BranchesNotMergedToDevelop `
+        -Since $Since `
+        -BaseBranch $BaseBranch `
+        -RemoteOnly:$RemoteOnly
+}
+
+function Select-NotMergedBranchInteractive {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyCollection()]
+        [object[]]$Items,
+        [ValidateRange(5, 200)]
+        [int]$PageSize = 15
+    )
+
+    if ($Items.Count -eq 0) {
+        return $null
+    }
+
+    if (-not $Host.UI -or -not $Host.UI.RawUI) {
+        throw "Interactive mode requires a console host with RawUI support."
+    }
+
+    $selectedIndex = 0
+    $topIndex = 0
+    $autoPageSize = 15
+
+    try {
+        $autoPageSize = [Math]::Max(5, $Host.UI.RawUI.WindowSize.Height - 9)
+    } catch {
+        $autoPageSize = 15
+    }
+    if ($PageSize -gt $autoPageSize) {
+        $PageSize = $autoPageSize
+    }
+
+    while ($true) {
+        Clear-Host
+        Write-Host "gbnmd interactive list" -ForegroundColor Cyan
+        Write-Host "Up/Down: move  PgUp/PgDn: page  Home/End: jump  Enter: inspect  Esc: cancel"
+        Write-Host ("Base: {0} | Branches: {1}" -f [string]$Items[0].BaseRef, $Items.Count)
+        if ($Items.Count -eq 1) {
+            Write-Host "Only one branch matches filters. Press Enter to inspect it." -ForegroundColor DarkYellow
+        }
+        Write-Host ''
+        Write-Host (" {0,-1} {1,-28} {2,-16} {3,5} {4,7} {5,7} {6,5} {7,-44}" -f '', 'Branch', 'Author', 'Cmts', '+', '-', 'Files', 'Changed files')
+
+        $lastIndex = [Math]::Min($Items.Count - 1, $topIndex + $PageSize - 1)
+        for ($i = $topIndex; $i -le $lastIndex; $i++) {
+            $item = $Items[$i]
+            $prefix = if ($i -eq $selectedIndex) { '>' } else { ' ' }
+            $line = (" {0} {1,-28} {2,-16} {3,5} {4,7} {5,7} {6,5} {7,-44}" -f
+                $prefix,
+                (Get-GitDisplaySnippet -Text ([string]$item.Branch) -MaxLength 28),
+                (Get-GitDisplaySnippet -Text ([string]$item.Author) -MaxLength 16),
+                [int]$item.Commits,
+                [int]$item.Insertions,
+                [int]$item.Deletions,
+                [int]$item.Files,
+                (Get-GitDisplaySnippet -Text ([string]$item.FilesPreview) -MaxLength 44)
+            )
+
+            if ($i -eq $selectedIndex) {
+                Write-Host $line -ForegroundColor Yellow
+            } else {
+                Write-Host $line
+            }
+        }
+
+        $action = ''
+        try {
+            if (-not [Console]::IsInputRedirected) {
+                $consoleKey = [Console]::ReadKey($true)
+                switch ($consoleKey.Key) {
+                    ([ConsoleKey]::UpArrow) { $action = 'up' }
+                    ([ConsoleKey]::DownArrow) { $action = 'down' }
+                    ([ConsoleKey]::PageUp) { $action = 'pageup' }
+                    ([ConsoleKey]::PageDown) { $action = 'pagedown' }
+                    ([ConsoleKey]::Home) { $action = 'home' }
+                    ([ConsoleKey]::End) { $action = 'end' }
+                    ([ConsoleKey]::Enter) { $action = 'enter' }
+                    ([ConsoleKey]::Escape) { $action = 'escape' }
+                }
+            }
+        } catch {
+            $action = ''
+        }
+
+        if (-not $action) {
+            $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            switch ($key.VirtualKeyCode) {
+                38 { $action = 'up' }
+                40 { $action = 'down' }
+                33 { $action = 'pageup' }
+                34 { $action = 'pagedown' }
+                36 { $action = 'home' }
+                35 { $action = 'end' }
+                13 { $action = 'enter' }
+                27 { $action = 'escape' }
+            }
+        }
+
+        switch ($action) {
+            'up' {
+                if ($selectedIndex -gt 0) {
+                    $selectedIndex--
+                    if ($selectedIndex -lt $topIndex) {
+                        $topIndex = $selectedIndex
+                    }
+                }
+                continue
+            }
+            'down' {
+                if ($selectedIndex -lt ($Items.Count - 1)) {
+                    $selectedIndex++
+                    if ($selectedIndex -ge ($topIndex + $PageSize)) {
+                        $topIndex = $selectedIndex - $PageSize + 1
+                    }
+                }
+                continue
+            }
+            'pageup' {
+                $selectedIndex = [Math]::Max(0, $selectedIndex - $PageSize)
+                $topIndex = [Math]::Max(0, $selectedIndex)
+                continue
+            }
+            'pagedown' {
+                $selectedIndex = [Math]::Min($Items.Count - 1, $selectedIndex + $PageSize)
+                $topIndex = [Math]::Max(0, $selectedIndex - $PageSize + 1)
+                continue
+            }
+            'home' {
+                $selectedIndex = 0
+                $topIndex = 0
+                continue
+            }
+            'end' {
+                $selectedIndex = $Items.Count - 1
+                $topIndex = [Math]::Max(0, $Items.Count - $PageSize)
+                continue
+            }
+            'enter' { return $Items[$selectedIndex] }
+            'escape' { return $null }
+            default { continue }
+        }
+    }
+}
+
+function Show-NotMergedBranchInspection {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [pscustomobject]$BranchDetail,
+        [ValidateSet('Commits', 'Changes', 'Patch')]
+        [string]$View = 'Commits'
+    )
+
+    $baseRef = [string]$BranchDetail.BaseRef
+    $branchRef = [string]$BranchDetail.Ref
+    $branchName = [string]$BranchDetail.Branch
+
+    if ([string]::IsNullOrWhiteSpace($baseRef)) {
+        throw "Base ref is missing in selected branch detail."
+    }
+    if ([string]::IsNullOrWhiteSpace($branchRef)) {
+        $branchRef = Get-GitBranchRefFromShortName -BranchName $branchName
+    }
+    if ([string]::IsNullOrWhiteSpace($branchRef)) {
+        throw "Branch ref is missing in selected branch detail."
+    }
+
+    $logRange = "$baseRef..$branchRef"
+    $diffRange = "$baseRef...$branchRef"
+
+    switch ($View) {
+        'Commits' {
+            Write-Host ("Commits unique to {0} against {1}" -f $branchName, $baseRef) -ForegroundColor Cyan
+            $commitLines = @(git --no-pager log --encoding=UTF-8 --decorate --date=short --pretty=format:'%h %ad %an %s' $logRange)
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to show commit list."
+            }
+            $commitLines | ForEach-Object {
+                Convert-FromGitMojibake -Text ([string]$_)
+            }
+        }
+        'Changes' {
+            Write-Host ("Change summary for {0} against {1}" -f $branchName, $baseRef) -ForegroundColor Cyan
+            $diffStatLines = @(git --no-pager diff --stat $diffRange)
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to show diff stat."
+            }
+            $diffStatLines | ForEach-Object {
+                Convert-FromGitMojibake -Text ([string]$_)
+            }
+            Write-Host ''
+            $nameStatusLines = @(git -c core.quotepath=false --no-pager diff --name-status $diffRange)
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to show changed files."
+            }
+            $nameStatusLines | ForEach-Object {
+                Convert-FromGitMojibake -Text ([string]$_)
+            }
+        }
+        'Patch' {
+            Write-Host ("Patch for {0} against {1}" -f $branchName, $baseRef) -ForegroundColor Cyan
+            $patchLines = @(git -c core.quotepath=false --no-pager diff --patch-with-stat $diffRange)
+            if ($LASTEXITCODE -ne 0) {
+                throw "Failed to show patch."
+            }
+            $patchLines | ForEach-Object {
+                Convert-FromGitMojibake -Text ([string]$_)
+            }
+        }
+    }
+}
+
+function Invoke-NotMergedBranchShortcut {
+    [CmdletBinding()]
+    param(
+        [string]$BaseBranch = 'develop',
+        [switch]$RemoteOnly,
+        [switch]$Detailed,
+        [switch]$Interactive,
+        [ValidateSet('Commits', 'Changes', 'Patch')]
+        [string]$View = 'Commits',
+        [datetime]$Since,
+        [ValidateRange(0, 36500)]
+        [int]$LastDays = 0,
+        [ValidateRange(1, 200)]
+        [int]$MaxFiles = 8,
+        [switch]$HasSince,
+        [string[]]$NativeArgs
+    )
+
+    if ($null -eq $NativeArgs) {
+        $NativeArgs = @()
+    }
+
+    $enhancedMode = $Detailed -or $Interactive -or $HasSince -or ($LastDays -gt 0)
+    if (-not $enhancedMode) {
+        if ($RemoteOnly) {
+            git branch -r --no-merged $BaseBranch --sort=-committerdate @NativeArgs
+        } else {
+            git branch --no-merged $BaseBranch --sort=-committerdate @NativeArgs
+        }
+        return
+    }
+
+    if ($NativeArgs.Count -gt 0) {
+        throw "Additional branch arguments are supported only in native mode (without -Detailed, -Interactive, -Since, -LastDays)."
+    }
+
+    $detailArgs = @{
+        BaseBranch = $BaseBranch
+        RemoteOnly = $RemoteOnly
+        LastDays   = $LastDays
+        MaxFiles   = $MaxFiles
+    }
+    if ($HasSince) {
+        $detailArgs.Since = $Since
+    } elseif ($LastDays -le 0) {
+        # Enhanced mode should behave like `git branch --no-merged` by default.
+        $detailArgs.Since = [datetime]::MinValue
+    }
+
+    $details = @(Get-BranchesNotMergedToDevelopDetails @detailArgs)
+    if ($details.Count -eq 0) {
+        Write-Host ("No not-merged branches found for base '{0}' with current filters." -f $BaseBranch) -ForegroundColor Yellow
+        return @()
+    }
+
+    if ($Interactive) {
+        $selected = Select-NotMergedBranchInteractive -Items $details
+        if ($null -eq $selected) {
+            return
+        }
+
+        Show-NotMergedBranchInspection -BranchDetail $selected -View $View
+        return
+    }
+
+    if ($Detailed) {
+        return $details | Select-Object Date, Branch, Author, Commits, Insertions, Deletions, Files, FilesPreview
+    }
+
+    return $details | Select-Object Date, Branch
+}
+
+function gbnmd {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0)]
+        [string]$BaseBranch = 'develop',
+        [switch]$Detailed,
+        [switch]$Interactive,
+        [ValidateSet('Commits', 'Changes', 'Patch')]
+        [string]$View = 'Commits',
+        [datetime]$Since,
+        [ValidateRange(0, 36500)]
+        [int]$LastDays = 0,
+        [ValidateRange(1, 200)]
+        [int]$MaxFiles = 8,
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$rest
+    )
+
+    if ($null -eq $rest) {
+        $rest = @()
+    }
+
+    $invokeArgs = @{
+        BaseBranch  = $BaseBranch
+        Detailed    = $Detailed
+        Interactive = $Interactive
+        View        = $View
+        LastDays    = $LastDays
+        MaxFiles    = $MaxFiles
+        HasSince    = $PSBoundParameters.ContainsKey('Since')
+        NativeArgs  = $rest
+    }
+    if ($PSBoundParameters.ContainsKey('Since')) {
+        $invokeArgs.Since = $Since
+    }
+
+    Invoke-NotMergedBranchShortcut @invokeArgs
+}
+
+function gbnmdr {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0)]
+        [string]$BaseBranch = 'develop',
+        [switch]$Detailed,
+        [switch]$Interactive,
+        [ValidateSet('Commits', 'Changes', 'Patch')]
+        [string]$View = 'Commits',
+        [datetime]$Since,
+        [ValidateRange(0, 36500)]
+        [int]$LastDays = 0,
+        [ValidateRange(1, 200)]
+        [int]$MaxFiles = 8,
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]]$rest
+    )
+
+    if ($null -eq $rest) {
+        $rest = @()
+    }
+
+    $invokeArgs = @{
+        BaseBranch  = $BaseBranch
+        RemoteOnly  = $true
+        Detailed    = $Detailed
+        Interactive = $Interactive
+        View        = $View
+        LastDays    = $LastDays
+        MaxFiles    = $MaxFiles
+        HasSince    = $PSBoundParameters.ContainsKey('Since')
+        NativeArgs  = $rest
+    }
+    if ($PSBoundParameters.ContainsKey('Since')) {
+        $invokeArgs.Since = $Since
+    }
+
+    Invoke-NotMergedBranchShortcut @invokeArgs
+}
+
+function gbnmdi {
+    [CmdletBinding()]
+    param(
+        [Parameter(Position = 0)]
+        [string]$BaseBranch = 'develop',
+        [switch]$RemoteOnly,
+        [ValidateSet('Commits', 'Changes', 'Patch')]
+        [string]$View = 'Commits',
+        [datetime]$Since,
+        [ValidateRange(0, 36500)]
+        [int]$LastDays = 0,
+        [ValidateRange(1, 200)]
+        [int]$MaxFiles = 8
+    )
+
+    $invokeArgs = @{
+        BaseBranch  = $BaseBranch
+        RemoteOnly  = $RemoteOnly
+        Interactive = $true
+        View        = $View
+        LastDays    = $LastDays
+        MaxFiles    = $MaxFiles
+        HasSince    = $PSBoundParameters.ContainsKey('Since')
+    }
+    if ($PSBoundParameters.ContainsKey('Since')) {
+        $invokeArgs.Since = $Since
+    }
+
+    Invoke-NotMergedBranchShortcut @invokeArgs
+}
+
+function gbsc { git branch --show-current @args }
+
 # Alias for shorter command
 
 # --- Set Aliases for Custom Functions ---
 Set-Alias gum UpMerge
 Set-Alias gur UpRebase
 Set-Alias gh ghash
+Set-Alias gbnms Get-BranchesNotMergedToDevelop
 
 
 # ===================================================================
@@ -1066,6 +1832,10 @@ function Register-GitAliasCompletion {
     $script:gitAliasMap['gwtm'] = 'worktree move'
     $script:gitAliasMap['gwtr'] = 'worktree remove'
     $script:gitAliasMap['gwtp'] = 'worktree prune'
+    $script:gitAliasMap['gbnmd'] = 'branch'
+    $script:gitAliasMap['gbnmdr'] = 'branch'
+    $script:gitAliasMap['gbnmdi'] = 'branch'
+    $script:gitAliasMap['gbsc'] = 'branch'
 
     if ($script:gitAliasMap.Count -eq 0) {
         Write-Warning "No git alias functions were found to register for completion."
@@ -1215,8 +1985,6 @@ function Register-GitAliasCompletion {
             Register-ArgumentCompleter -CommandName $aliasName -ScriptBlock $proxyCompleter
         }
     }
-
-    Write-Host "Git alias tab completion is now active for $($script:gitAliasMap.Count) aliases." -ForegroundColor Cyan
 }
 
 # --- Run Registration and Export Members ---

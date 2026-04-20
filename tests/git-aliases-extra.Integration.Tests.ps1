@@ -33,6 +33,50 @@ BeforeAll {
         }
     }
 
+    function Script:Invoke-GitDatedCommit {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$RepoPath,
+            [Parameter(Mandatory = $true)]
+            [string]$FileName,
+            [Parameter(Mandatory = $true)]
+            [string]$Content,
+            [Parameter(Mandatory = $true)]
+            [string]$Message,
+            [Parameter(Mandatory = $true)]
+            [datetime]$Date
+        )
+
+        $filePath = Join-Path $RepoPath $FileName
+        Set-Content -Path $filePath -Value $Content -NoNewline -Encoding ascii
+        Invoke-GitCommand -RepoPath $RepoPath -Arguments @('add', $FileName) | Out-Null
+
+        $stamp = $Date.ToString('o')
+        $previousAuthor = $env:GIT_AUTHOR_DATE
+        $previousCommitter = $env:GIT_COMMITTER_DATE
+        $hadAuthor = Test-Path Env:\GIT_AUTHOR_DATE
+        $hadCommitter = Test-Path Env:\GIT_COMMITTER_DATE
+
+        try {
+            $env:GIT_AUTHOR_DATE = $stamp
+            $env:GIT_COMMITTER_DATE = $stamp
+            Invoke-GitCommand -RepoPath $RepoPath -Arguments @('commit', '-m', $Message) | Out-Null
+        } finally {
+            if ($hadAuthor) {
+                $env:GIT_AUTHOR_DATE = $previousAuthor
+            } else {
+                Remove-Item Env:\GIT_AUTHOR_DATE -ErrorAction SilentlyContinue
+            }
+
+            if ($hadCommitter) {
+                $env:GIT_COMMITTER_DATE = $previousCommitter
+            } else {
+                Remove-Item Env:\GIT_COMMITTER_DATE -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
     function Script:Find-BlobPrefixCollision {
         [CmdletBinding()]
         param(
@@ -97,6 +141,24 @@ BeforeAll {
         return (Get-TabCompletionResult -Line ("{0} {1}" -f $CommandName, $FallbackPrefix))
     }
 
+    function Script:Get-BranchNamesFromBranchOutput {
+        [CmdletBinding()]
+        param(
+            [Parameter(Mandatory = $true)]
+            [string]$Text
+        )
+
+        return @(
+            $Text -split "`r?`n" |
+            ForEach-Object {
+                $clean = ([string]$_ -replace '^[\*\+\s]+', '').Trim()
+                if ([string]::IsNullOrWhiteSpace($clean)) { return }
+                if ($clean -match '\s+->\s+') { return }
+                $clean
+            }
+        )
+    }
+
     [string]$script:RepoRoot = Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..') |
         Select-Object -ExpandProperty Path -First 1
     $script:ModuleManifest = Join-Path $script:RepoRoot 'git-aliases-extra.psd1'
@@ -125,6 +187,13 @@ Describe 'git-aliases-extra module' {
         Get-Command Get-Git-Aliases -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command gfp -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command gsw -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command Get-BranchesNotMergedToDevelop -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command Get-BranchesNotMergedToDevelopDetails -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gbnmd -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gbnmdr -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gbnmdi -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gbsc -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gbnms -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command gwt -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command gwtr -ErrorAction Stop | Should -Not -BeNullOrEmpty
     }
@@ -511,6 +580,281 @@ Describe 'gsw integration' {
 
             (Invoke-GitCommand -RepoPath $clonePath -Arguments @('rev-parse', '--abbrev-ref', 'HEAD')).Output | Should -Be '8695'
             (Invoke-GitCommand -RepoPath $clonePath -Arguments @('rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}')).Output | Should -Be 'origin/8695'
+        } finally {
+            if (Test-Path $tempRoot) {
+                Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+Describe 'branch visibility helpers integration' {
+    It 'returns current branch via gbsc' -Skip:(-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("gbsc-integration-" + [guid]::NewGuid().Guid)
+        $repoPath = Join-Path $tempRoot 'repo'
+
+        New-Item -ItemType Directory -Path $repoPath -Force | Out-Null
+        try {
+            Invoke-GitCommand -RepoPath $tempRoot -Arguments @('init', $repoPath) | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.email', 'test@example.com') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.name', 'Test User') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'commit.gpgsign', 'false') | Out-Null
+
+            Set-Content -Path (Join-Path $repoPath 'README.md') -Value 'root' -NoNewline -Encoding ascii
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('add', 'README.md') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('commit', '-m', 'init') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('branch', '-M', 'develop') | Out-Null
+
+            Push-Location $repoPath
+            try {
+                $branch = (gbsc | Out-String).Trim()
+            } finally {
+                Pop-Location
+            }
+
+            $branch | Should -Be 'develop'
+        } finally {
+            if (Test-Path $tempRoot) {
+                Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    It 'lists non-merged branches with gbnmd and gbnmdr and supports optional base branch argument' -Skip:(-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("gbnmd-integration-" + [guid]::NewGuid().Guid)
+        $remotePath = Join-Path $tempRoot 'remote.git'
+        $repoPath = Join-Path $tempRoot 'repo'
+
+        New-Item -ItemType Directory -Path $repoPath -Force | Out-Null
+        try {
+            $oldDate = (Get-Date).AddDays(-14)
+            $newDate = (Get-Date).AddHours(-1)
+
+            Invoke-GitCommand -RepoPath $tempRoot -Arguments @('init', '--bare', $remotePath) | Out-Null
+            Invoke-GitCommand -RepoPath $tempRoot -Arguments @('init', $repoPath) | Out-Null
+
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.email', 'test@example.com') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.name', 'Test User') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'commit.gpgsign', 'false') | Out-Null
+
+            Invoke-GitDatedCommit `
+                -RepoPath $repoPath `
+                -FileName 'README.md' `
+                -Content 'root' `
+                -Message 'init develop' `
+                -Date $oldDate
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('branch', '-M', 'develop') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('remote', 'add', 'origin', $remotePath) | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('push', '-u', 'origin', 'develop') | Out-Null
+
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('switch', '-c', 'feature/old', 'develop') | Out-Null
+            Invoke-GitDatedCommit `
+                -RepoPath $repoPath `
+                -FileName 'old.txt' `
+                -Content 'old' `
+                -Message 'feature old' `
+                -Date $oldDate
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('push', '-u', 'origin', 'feature/old') | Out-Null
+
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('switch', 'develop') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('switch', '-c', 'feature/new', 'develop') | Out-Null
+            Invoke-GitDatedCommit `
+                -RepoPath $repoPath `
+                -FileName 'new.txt' `
+                -Content 'new' `
+                -Message 'feature new' `
+                -Date $newDate
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('push', '-u', 'origin', 'feature/new') | Out-Null
+
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('switch', 'develop') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('switch', '-c', 'feature/merged', 'develop') | Out-Null
+            Invoke-GitDatedCommit `
+                -RepoPath $repoPath `
+                -FileName 'merged.txt' `
+                -Content 'merged' `
+                -Message 'feature merged' `
+                -Date (Get-Date).AddHours(-2)
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('switch', 'develop') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('merge', '--no-ff', 'feature/merged', '-m', 'merge feature/merged') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('push', 'origin', 'develop', 'feature/merged') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('branch', 'main', 'develop') | Out-Null
+
+            Push-Location $repoPath
+            try {
+                $localDefault = Get-BranchNamesFromBranchOutput -Text (gbnmd | Out-String)
+                $localMain = Get-BranchNamesFromBranchOutput -Text (gbnmd main | Out-String)
+                $remoteDefault = Get-BranchNamesFromBranchOutput -Text (gbnmdr | Out-String)
+            } finally {
+                Pop-Location
+            }
+
+            $localDefault | Should -Contain 'feature/new'
+            $localDefault | Should -Contain 'feature/old'
+            $localDefault | Should -Not -Contain 'feature/merged'
+            ([array]::IndexOf($localDefault, 'feature/new')) |
+                Should -BeLessThan ([array]::IndexOf($localDefault, 'feature/old'))
+
+            $localMain | Should -Contain 'feature/new'
+            $localMain | Should -Contain 'feature/old'
+
+            $remoteDefault | Should -Contain 'origin/feature/new'
+            $remoteDefault | Should -Contain 'origin/feature/old'
+            $remoteDefault | Should -Not -Contain 'origin/feature/merged'
+            ([array]::IndexOf($remoteDefault, 'origin/feature/new')) |
+                Should -BeLessThan ([array]::IndexOf($remoteDefault, 'origin/feature/old'))
+        } finally {
+            if (Test-Path $tempRoot) {
+                Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+
+    It 'filters non-merged branches by date and supports LastDays, RemoteOnly, and shortcut compatibility' -Skip:(-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        $tempRoot = Join-Path ([IO.Path]::GetTempPath()) ("gbnms-integration-" + [guid]::NewGuid().Guid)
+        $remotePath = Join-Path $tempRoot 'remote.git'
+        $repoPath = Join-Path $tempRoot 'repo'
+        $clonePath = Join-Path $tempRoot 'clone'
+
+        New-Item -ItemType Directory -Path $repoPath -Force | Out-Null
+        try {
+            $oldDate = (Get-Date).AddDays(-10)
+            $recentDate = (Get-Date).AddHours(-2)
+            $localOnlyDate = (Get-Date).AddHours(-1)
+            $since = (Get-Date).Date.AddDays(-3)
+
+            Invoke-GitCommand -RepoPath $tempRoot -Arguments @('init', '--bare', $remotePath) | Out-Null
+            Invoke-GitCommand -RepoPath $tempRoot -Arguments @('init', $repoPath) | Out-Null
+
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.email', 'test@example.com') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'user.name', 'Test User') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('config', 'commit.gpgsign', 'false') | Out-Null
+
+            Invoke-GitDatedCommit `
+                -RepoPath $repoPath `
+                -FileName 'README.md' `
+                -Content 'root' `
+                -Message 'init develop' `
+                -Date $oldDate
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('branch', '-M', 'develop') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('remote', 'add', 'origin', $remotePath) | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('push', '-u', 'origin', 'develop') | Out-Null
+
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('switch', '-c', 'feature/old', 'develop') | Out-Null
+            Invoke-GitDatedCommit `
+                -RepoPath $repoPath `
+                -FileName 'old.txt' `
+                -Content 'old' `
+                -Message 'feature old' `
+                -Date $oldDate
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('push', '-u', 'origin', 'feature/old') | Out-Null
+
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('switch', 'develop') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('switch', '-c', 'feature/recent', 'develop') | Out-Null
+            Invoke-GitDatedCommit `
+                -RepoPath $repoPath `
+                -FileName 'recent.txt' `
+                -Content 'recent' `
+                -Message 'feature recent' `
+                -Date $recentDate
+            Invoke-GitDatedCommit `
+                -RepoPath $repoPath `
+                -FileName 'recent-2.txt' `
+                -Content 'recent-2' `
+                -Message 'feature recent file 2' `
+                -Date ($recentDate.AddMinutes(1))
+            Invoke-GitDatedCommit `
+                -RepoPath $repoPath `
+                -FileName 'recent-3.txt' `
+                -Content 'recent-3' `
+                -Message 'feature recent file 3' `
+                -Date ($recentDate.AddMinutes(2))
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('push', '-u', 'origin', 'feature/recent') | Out-Null
+
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('switch', 'develop') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('switch', '-c', 'feature/local-only', 'develop') | Out-Null
+            Invoke-GitDatedCommit `
+                -RepoPath $repoPath `
+                -FileName 'local-only.txt' `
+                -Content 'local-only' `
+                -Message 'feature local only' `
+                -Date $localOnlyDate
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('switch', 'develop') | Out-Null
+            Invoke-GitCommand -RepoPath $repoPath -Arguments @('fetch', 'origin', '--prune') | Out-Null
+            Invoke-GitCommand -RepoPath $tempRoot -Arguments @('clone', $remotePath, $clonePath) | Out-Null
+
+            Push-Location $repoPath
+            try {
+                $branchBeforeDetailed = (gbsc | Out-String).Trim()
+                $recentAll = @(Get-BranchesNotMergedToDevelop -Since $since)
+                $recentLastDays = @(gbnms -LastDays 3)
+                $recentCompatibility = @(Get-BranchesNotMergedToDevelopSinceDate -Since $since)
+                $detailedLocal = @(gbnmd -Detailed -Since $since -MaxFiles 2)
+                $detailedViaFunction = @(Get-BranchesNotMergedToDevelopDetails -Since $since -MaxFiles 2)
+                $branchAfterDetailed = (gbsc | Out-String).Trim()
+            } finally {
+                Pop-Location
+            }
+
+            Push-Location $clonePath
+            try {
+                $recentRemoteOnly = @(Get-BranchesNotMergedToDevelop -Since $since -RemoteOnly)
+                $detailedRemote = @(gbnmdr -Detailed -Since $since -MaxFiles 2)
+            } finally {
+                Pop-Location
+            }
+
+            $recentAll.Count | Should -BeGreaterThan 0
+            $recentAll[0].PSObject.Properties.Name | Should -Contain 'Date'
+            $recentAll[0].PSObject.Properties.Name | Should -Contain 'Branch'
+
+            $recentAllBranches = @($recentAll | Select-Object -ExpandProperty Branch)
+            $recentAllBranches | Should -Contain 'feature/recent'
+            $recentAllBranches | Should -Contain 'origin/feature/recent'
+            $recentAllBranches | Should -Contain 'feature/local-only'
+            $recentAllBranches | Should -Not -Contain 'feature/old'
+            $recentAllBranches | Should -Not -Contain 'origin/feature/old'
+
+            $recentLastDaysBranches = @($recentLastDays | Select-Object -ExpandProperty Branch)
+            $recentLastDaysBranches | Should -Contain 'feature/recent'
+            $recentLastDaysBranches | Should -Not -Contain 'feature/old'
+
+            $recentRemoteOnlyBranches = @($recentRemoteOnly | ForEach-Object { $_.Branch })
+            $recentRemoteOnlyBranches | Should -Not -Contain 'feature/local-only'
+            if ($recentRemoteOnlyBranches.Count -gt 0) {
+                $recentRemoteOnlyBranches | Should -Contain 'origin/feature/recent'
+                $recentRemoteOnlyBranches | Should -Not -Contain 'origin/HEAD'
+                (@($recentRemoteOnlyBranches | Where-Object { $_ -notlike 'origin/*' })).Count | Should -Be 0
+            }
+
+            $recentCompatibilityBranches = @($recentCompatibility | Select-Object -ExpandProperty Branch)
+            $recentCompatibilityBranches | Should -Contain 'feature/recent'
+            $recentCompatibilityBranches | Should -Contain 'origin/feature/recent'
+
+            $branchBeforeDetailed | Should -Be 'develop'
+            $branchAfterDetailed | Should -Be 'develop'
+
+            $detailedLocal.Count | Should -BeGreaterThan 0
+            $detailedLocal[0].PSObject.Properties.Name | Should -Contain 'Author'
+            $detailedLocal[0].PSObject.Properties.Name | Should -Contain 'Commits'
+            $detailedLocal[0].PSObject.Properties.Name | Should -Contain 'Insertions'
+            $detailedLocal[0].PSObject.Properties.Name | Should -Contain 'Deletions'
+            $detailedLocal[0].PSObject.Properties.Name | Should -Contain 'Files'
+            $detailedLocal[0].PSObject.Properties.Name | Should -Contain 'FilesPreview'
+            $detailedLocalBranches = @($detailedLocal | Select-Object -ExpandProperty Branch)
+            $detailedLocalBranches | Should -Contain 'feature/recent'
+            $detailedLocalBranches | Should -Not -Contain 'feature/old'
+            @($detailedLocal | Where-Object { $_.FilesPreview -match '\+1 more|\+2 more|\+3 more|\+4 more' }).Count |
+                Should -BeGreaterThan 0
+
+            $detailedViaFunction.Count | Should -BeGreaterThan 0
+            $detailedFunctionBranches = @($detailedViaFunction | Select-Object -ExpandProperty Branch)
+            $detailedFunctionBranches | Should -Contain 'feature/recent'
+
+            $detailedRemoteBranches = @($detailedRemote | Select-Object -ExpandProperty Branch)
+            if ($detailedRemoteBranches.Count -gt 0) {
+                $detailedRemoteBranches | Should -Contain 'origin/feature/recent'
+                $detailedRemoteBranches | Should -Not -Contain 'feature/local-only'
+            }
         } finally {
             if (Test-Path $tempRoot) {
                 Remove-Item -Path $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

@@ -23,6 +23,11 @@ Describe 'git-aliases-extra manifest' {
         $manifest.Name | Should -Be 'git-aliases-extra'
     }
 
+    It 'keeps the module source ASCII-only for Windows PowerShell compatibility' {
+        $moduleSource = Get-Content -LiteralPath (Join-Path $script:RepoRoot 'git-aliases-extra.psm1') -Raw
+        [regex]::Matches($moduleSource, '[^\u0000-\u007F]').Count | Should -Be 0
+    }
+
     It 'declares gallery metadata and required modules' {
         $manifest = Import-PowerShellDataFile -Path $script:ModuleManifest
         $manifest.PrivateData.PSData.ProjectUri | Should -Match '^https://github.com/PhysShell/git-aliases-extra'
@@ -52,6 +57,13 @@ Describe 'git-aliases-extra module exports' {
     It 'exports key commands' {
         Get-Command gsw -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command gfp -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command Get-BranchesNotMergedToDevelop -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command Get-BranchesNotMergedToDevelopDetails -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gbnmd -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gbnmdr -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gbnmdi -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gbsc -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gbnms -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command gwt -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command gwtr -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command Register-GitAliasCompletion -ErrorAction Stop | Should -Not -BeNullOrEmpty

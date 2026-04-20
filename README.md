@@ -105,11 +105,82 @@ Branch completion (Tab) works for:
 - `gwt add <path> <TAB>`
 - `gwt add <path> -f <TAB>`
 
+## Not merged branch helpers
+
+Quick branch visibility shortcuts:
+
+- `gbnmd [base-branch]` -> `git branch --no-merged <base-branch> --sort=-committerdate` (default base: `develop`)
+- `gbnmdr [base-branch]` -> same command with `-r` (remote branches only)
+- `gbnmdi [base-branch]` -> interactive branch browser (arrow keys + Enter)
+- `gbsc` -> `git branch --show-current`
+
+Date-filtered helper:
+
+```powershell
+Get-BranchesNotMergedToDevelop `
+  [-Since <datetime>] `
+  [-LastDays <int>] `
+  [-BaseBranch <string>] `
+  [-RemoteOnly]
+```
+
+Detailed metadata helper:
+
+```powershell
+Get-BranchesNotMergedToDevelopDetails `
+  [-Since <datetime>] `
+  [-LastDays <int>] `
+  [-BaseBranch <string>] `
+  [-RemoteOnly] `
+  [-MaxFiles <int>]
+```
+
+Notes:
+- if `-Since` is omitted and `-LastDays` is `0`, filtering starts from today (`(Get-Date).Date`);
+- if `-Since` is omitted and `-LastDays` is greater than `0`, filtering starts from `today - LastDays`;
+- no checkout/switch is performed; everything is computed from refs and diffs;
+- detailed output fields: `Date`, `Branch`, `Author`, `Commits`, `Insertions`, `Deletions`, `Files`, `FilesPreview`.
+
+Examples:
+
+```powershell
+# Since today
+Get-BranchesNotMergedToDevelop
+
+# Since specific date/time
+Get-BranchesNotMergedToDevelop -Since '2026-03-12'
+Get-BranchesNotMergedToDevelop -Since '2026-03-12 15:30'
+
+# Last 3 days
+Get-BranchesNotMergedToDevelop -LastDays 3
+
+# Remote only
+Get-BranchesNotMergedToDevelop -Since '2026-03-12' -RemoteOnly
+
+# Shortcut alias
+gbnms -LastDays 7 | Sort-Object Date -Descending
+
+# Detailed table with author/commit/stats and truncated file list
+gbnmd -Detailed -Since '2026-03-12' -MaxFiles 5 |
+Format-Table -AutoSize
+
+# Interactive mode (arrows + Enter)
+# View modes: Commits (default), Changes, Patch
+gbnmd -Interactive -View Commits
+gbnmdr -Interactive -View Changes
+gbnmdi -View Patch
+```
+
 ## Aliases
 
 | Alias | Command | Source |
 | :---- | :------ | :----- |
 | gapt | git apply --3way @args | extra |
+| gbnmd | Show local branches not merged into `<base-branch>` (default `develop`); supports `-Detailed` and `-Interactive`. | extra |
+| gbnmdr | Show remote branches (`-r`) not merged into `<base-branch>` (default `develop`); supports `-Detailed` and `-Interactive`. | extra |
+| gbnmdi | Interactive branch browser for not-merged branches (`-View Commits|Changes|Patch`, `-RemoteOnly` supported). | extra |
+| gbnms | Alias -> Get-BranchesNotMergedToDevelop | extra |
+| gbsc | git branch --show-current @args | extra |
 | gccd | param([Parameter(ValueFromRemainingArguments=$true)][string[]]$rest) <br> git clone --recurse-submodules @rest <br> $last = if ($rest.Count) { $rest[-1] } else { '' } <br> if ($last -match '\.git$') { $last = $last -replace '\.git$','' } <br> if ($last) { <br>   $dirName = Split-Path $last -Leaf <br>   if (Test-Path $dirName) { <br>     Set-Location $dirName <br>   } <br> } | extra |
 | gcor | git checkout --recurse-submodules @args | extra |
 | gdct | git describe --tags (git rev-list --tags --max-count=1) | extra |
