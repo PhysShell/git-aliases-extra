@@ -55,6 +55,12 @@ Describe 'git-aliases-extra module exports' {
     }
 
     It 'exports key commands' {
+        Get-Command gdf -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gdregion -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command glregion -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command glfp -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gprlog -ErrorAction Stop | Should -Not -BeNullOrEmpty
+        Get-Command gmb -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command gsw -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command gfp -ErrorAction Stop | Should -Not -BeNullOrEmpty
         Get-Command Get-BranchesNotMergedToDevelop -ErrorAction Stop | Should -Not -BeNullOrEmpty

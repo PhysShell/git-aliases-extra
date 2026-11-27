@@ -1115,3 +1115,92 @@ Describe 'worktree aliases integration' {
         }
     }
 }
+
+Describe 'file and PR history helpers' {
+    BeforeAll {
+        $script:HistoryRepo = Join-Path ([IO.Path]::GetTempPath()) ("gae-history-{0}" -f [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $script:HistoryRepo | Out-Null
+        Invoke-GitCommand $script:HistoryRepo @('init', '-b', 'main') | Out-Null
+        Invoke-GitCommand $script:HistoryRepo @('config', 'user.email', 'test@example.com') | Out-Null
+        Invoke-GitCommand $script:HistoryRepo @('config', 'user.name', 'Test') | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $script:HistoryRepo 'source dir') | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $script:HistoryRepo 'other') | Out-Null
+        $script:HistoryFile = Join-Path $script:HistoryRepo 'source dir/Calculator.cs'
+        $script:HistoryLines = @(1..100 | ForEach-Object { "line $_" })
+        $script:HistoryLines[49] = 'Name == "IsCalculatable"'
+        Set-Content -LiteralPath $script:HistoryFile -Value $script:HistoryLines -Encoding ascii
+        Set-Content -LiteralPath (Join-Path $script:HistoryRepo 'Root.cs') -Value 'root old' -Encoding ascii
+        Invoke-GitCommand $script:HistoryRepo @('add', '.') | Out-Null
+        Invoke-GitCommand $script:HistoryRepo @('commit', '-m', 'history base') | Out-Null
+        $script:HistoryBase = (Invoke-GitCommand $script:HistoryRepo @('rev-parse', 'HEAD')).Output
+        Invoke-GitCommand $script:HistoryRepo @('switch', '-c', 'side') | Out-Null
+        $script:HistoryLines[50] = 'near change'
+        $script:HistoryLines[89] = 'far change'
+        Set-Content -LiteralPath $script:HistoryFile -Value $script:HistoryLines -Encoding ascii
+        Invoke-GitCommand $script:HistoryRepo @('commit', '-am', 'side change') | Out-Null
+        $script:HistorySide = (Invoke-GitCommand $script:HistoryRepo @('rev-parse', 'HEAD')).Output
+        Invoke-GitCommand $script:HistoryRepo @('switch', 'main') | Out-Null
+        Set-Content -LiteralPath (Join-Path $script:HistoryRepo 'Root.cs') -Value 'root new' -Encoding ascii
+        Invoke-GitCommand $script:HistoryRepo @('commit', '-am', 'main change') | Out-Null
+        $script:HistoryMain = (Invoke-GitCommand $script:HistoryRepo @('rev-parse', 'HEAD')).Output
+        Invoke-GitCommand $script:HistoryRepo @('merge', '--no-ff', '-m', 'integrate side', 'side') | Out-Null
+        $script:HistoryMerge = (Invoke-GitCommand $script:HistoryRepo @('rev-parse', 'HEAD')).Output
+        Copy-Item -LiteralPath $script:HistoryFile -Destination (Join-Path $script:HistoryRepo 'other/Calculator.cs')
+        Invoke-GitCommand $script:HistoryRepo @('add', '.') | Out-Null
+        Invoke-GitCommand $script:HistoryRepo @('commit', '-m', 'duplicate filename') | Out-Null
+        $script:HistoryDuplicate = (Invoke-GitCommand $script:HistoryRepo @('rev-parse', 'HEAD')).Output
+    }
+
+    AfterAll {
+        if ($script:HistoryRepo) { Remove-Item -LiteralPath $script:HistoryRepo -Recurse -Force }
+    }
+
+    BeforeEach { Push-Location -LiteralPath (Join-Path $script:HistoryRepo 'other') }
+    AfterEach { Pop-Location }
+
+    It 'diffs historical filenames and glob patterns from a nested directory' {
+        $patch = (gdf $script:HistoryBase $script:HistoryMerge Calculator.cs | Out-String)
+        $patch | Should -Match '\+near change'
+        $patch | Should -Match '\+far change'
+        $patch | Should -Not -Match 'root new'
+        (gdf $script:HistoryBase $script:HistoryMerge '*Calc*.cs' | Out-String) | Should -Match '\+near change'
+        (gdf $script:HistoryBase $script:HistoryMerge Root.cs | Out-String) | Should -Match '\+root new'
+    }
+
+    It 'filters real diff hunks around a quoted literal without far changes' {
+        $patch = (gdregion $script:HistoryMain $script:HistorySide Calculator.cs 'Name == "IsCalculatable"' -Around 2 | Out-String)
+        $patch | Should -Match '\+near change'
+        $patch | Should -Match '@@ -49,'
+        $patch | Should -Not -Match 'far change'
+        (Get-Location).Path | Should -Be (Join-Path $script:HistoryRepo 'other')
+    }
+
+    It 'uses historical trees, rejects ambiguity and missing literal anchors' {
+        { gdregion $script:HistoryBase $script:HistoryDuplicate Calculator.cs 'IsCalculatable' } | Should -Throw '*exactly one file*'
+        { gdregion $script:HistoryBase $script:HistorySide Missing.cs 'IsCalculatable' } | Should -Throw '*exactly one file*'
+        { gdregion $script:HistoryBase $script:HistorySide Calculator.cs 'missing anchor' } | Should -Throw '*exactly one line*'
+        { gdregion $script:HistoryBase $script:HistorySide Calculator.cs 'line' } | Should -Throw '*exactly one line*'
+        (gdregion $script:HistoryBase $script:HistoryDuplicate 'source dir/Calculator.cs' 'IsCalculatable' -Around 2 | Out-String) | Should -Match '\+near change'
+    }
+
+    It 'shows no region hunks for unchanged endpoint text' {
+        @(gdregion $script:HistorySide $script:HistoryMerge Calculator.cs 'IsCalculatable' -Around 2).Count | Should -Be 0
+    }
+
+    It 'compares against the unique merge base and refuses a divergent line history' {
+        (gmb $script:HistoryMain $script:HistorySide) | Should -Be $script:HistoryBase
+        (gdf $script:HistoryMain $script:HistorySide Root.cs -MergeBase | Out-String).Trim() | Should -BeNullOrEmpty
+        { glregion $script:HistoryMain $script:HistorySide Calculator.cs 'IsCalculatable' } | Should -Throw '*not an ancestor*'
+        (glregion $script:HistoryMain $script:HistorySide Calculator.cs 'IsCalculatable' -MergeBase -Around 2 | Out-String) | Should -Match '\+near change'
+    }
+
+    It 'shows integrated changes at the merge and rejects a second-parent boundary' {
+        $patch = (gprlog $script:HistoryBase $script:HistoryMerge Calculator.cs | Out-String)
+        $patch | Should -Match 'integrate side'
+        $patch | Should -Match '\+near change'
+        $patch | Should -Not -Match 'side change'
+        { gprlog $script:HistorySide $script:HistoryMerge Calculator.cs } | Should -Throw '*first-parent*'
+        (glfp $script:HistoryMerge | Out-String) | Should -Match 'integrate side'
+        (glfp $script:HistoryMerge | Out-String) | Should -Not -Match 'side change'
+    }
+}

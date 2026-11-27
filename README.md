@@ -171,6 +171,39 @@ gbnmdr -Interactive -View Changes
 gbnmdi -View Patch
 ```
 
+## File and PR history shortcuts
+
+All commands are read-only and accept commit IDs, tags, or branch refs. A bare filename or glob is searched recursively from the repository root; an explicit path/glob containing a slash is relative to the repository root. Use `./File.cs` to select a root-level file only. Quote glob patterns and text with spaces or double quotes.
+
+```powershell
+# Endpoint diff, two context lines, no CRLF-only noise
+gdf A B Calculator.cs
+gdf A B '*Calculator*.cs' -Context 0
+
+# PR-style comparison from the common ancestor to B
+gdf A B Calculator.cs -MergeBase
+gmb A B
+
+# Real diff hunks within +/- 20 lines of a unique literal anchor
+gdregion A B Calculator.cs 'Name == "IsCalculatable"' -Around 20
+gdregion A B '**/Calculator.cs' 'IsCalculatable' -MergeBase
+
+# History of that region (A must be an ancestor of B)
+glregion A B Calculator.cs 'Name == "IsCalculatable"' -Around 20
+glregion A B Calculator.cs 'IsCalculatable' -MergeBase
+
+# First-parent history and changes brought in by integrated PRs
+glfp origin/develop
+gprlog A B Calculator.cs
+gprlog A B '*Calculator*.cs' -Context 1
+```
+
+- `gdf` and `gprlog` accept multiple matching files. `gdregion` requires exactly one matching historical file and one matching line in **each** endpoint; `glregion` resolves the file and literal anchor in the ending commit. Region commands reject missing or ambiguous anchors/files rather than silently selecting one.
+- `gdregion` filters genuine unified diff hunks using line windows in both snapshots. It preserves original line numbers and includes entire intersecting hunks (a large contiguous change may extend beyond the window). It compares text, not behavior, and ignores CRLF-only changes. It can compare unrelated endpoints; it does not reconstruct intermediate history.
+- `glregion` uses Git's `log -L`; its merge/history/rename limitations still apply. An empty result is not a proof of unchanged behavior. Use `gprlog` or explicit merge-parent diffs for integration changes.
+- `gprlog` requires A on the first-parent chain of B and compares merges with their first parent. `-MergeBase` selects the unique common ancestor, not an arbitrary one if multiple exist. A/B are not required to be ancestors for the default endpoint diff.
+- Region helpers are for ordinary text-file paths; Git-quoted special-character paths and non-text diffs are rejected. The new helpers use modern Git (including `--diff-merges=first-parent`).
+
 ## Aliases
 
 | Alias | Command | Source |
@@ -184,6 +217,12 @@ gbnmdi -View Patch
 | gccd | param([Parameter(ValueFromRemainingArguments=$true)][string[]]$rest) <br> git clone --recurse-submodules @rest <br> $last = if ($rest.Count) { $rest[-1] } else { '' } <br> if ($last -match '\.git$') { $last = $last -replace '\.git$','' } <br> if ($last) { <br>   $dirName = Split-Path $last -Leaf <br>   if (Test-Path $dirName) { <br>     Set-Location $dirName <br>   } <br> } | extra |
 | gcor | git checkout --recurse-submodules @args | extra |
 | gdct | git describe --tags (git rev-list --tags --max-count=1) | extra |
+| gdf | Endpoint file/glob diff with compact context; optional -MergeBase. | extra |
+| gdregion | Diff hunks near a unique literal anchor in two snapshots. | extra |
+| glregion | Line-region history with historical file/glob resolution. | extra |
+| glfp | git log --first-parent --graph --oneline --decorate @args | extra |
+| gprlog | First-parent PR integration patches for file/glob. | extra |
+| gmb | git merge-base @args | extra |
 | gdnolock | git diff @args ":(exclude)package-lock.json" ":(exclude)*.lock" | extra |
 | gdt | git diff-tree --no-commit-id --name-only -r @args | extra |
 | gdv | git diff -w @args \| Out-String \| less | extra |

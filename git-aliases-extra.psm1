@@ -748,6 +748,197 @@ function gdct   { git describe --tags (git rev-list --tags --max-count=1) }
 function gdt    { git diff-tree --no-commit-id --name-only -r @args }
 function gdnolock { git diff @args ":(exclude)package-lock.json" ":(exclude)*.lock" }
 function gdv    { git diff -w @args | Out-String | less }
+# Read-only file and line history helpers.
+function Resolve-GitHistoryCommit {
+    param([string]$Ref)
+    $sha = git rev-parse --verify --end-of-options "$Ref^{commit}"
+    if ($LASTEXITCODE -ne 0) { throw "Cannot resolve commit '$Ref'." }
+    return [string]$sha
+}
+
+function Get-GitHistoryEndpoints {
+    param([string]$From, [string]$To, [switch]$MergeBase)
+    $a = Resolve-GitHistoryCommit $From
+    $b = Resolve-GitHistoryCommit $To
+    if ($MergeBase) {
+        $bases = @(git merge-base --all $a $b)
+        if ($LASTEXITCODE -ne 0 -or $bases.Count -ne 1) {
+            throw 'Expected exactly one merge base. Specify the base commit explicitly.'
+        }
+        $a = $bases[0]
+    }
+    [pscustomobject]@{ From = $a; To = $b }
+}
+
+function ConvertTo-GitHistoryPathspec {
+    param([string]$File)
+    $pattern = $File.Replace('\', '/')
+    if ($pattern.StartsWith('./')) { $pattern = $pattern.Substring(2) }
+    elseif (-not $pattern.Contains('/')) { $pattern = "**/$pattern" }
+    return ":(top,glob)$pattern"
+}
+
+function Get-GitHistoryRegion {
+    param([string]$Commit, [string]$File, [string]$Needle, [int]$Around)
+    # Read the historical tree, not the working tree. Use the same Git glob
+    # engine as diff by comparing the tree to Git's empty tree.
+    $treeFormat = git rev-parse --show-object-format
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot determine Git object format.' }
+    # Git recognizes its canonical empty tree even in a repository without it.
+    $emptyTree = switch ($treeFormat) {
+        'sha1' { '4b825dc642cb6eb9a060e54bf8d69288fbee4904' }
+        'sha256' { '6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321' }
+        default { throw "Unsupported Git object format '$treeFormat'." }
+    }
+    $pathspec = ConvertTo-GitHistoryPathspec $File
+    $paths = @(git -c core.quotePath=false diff --no-ext-diff --no-renames --name-only $emptyTree $Commit -- $pathspec)
+    if ($LASTEXITCODE -ne 0) { throw "Cannot list files in $Commit." }
+    if ($paths.Count -ne 1) {
+        throw ("Expected exactly one file matching '{0}' at {1}; found {2}: {3}" -f $File, $Commit, $paths.Count, ($paths -join ', '))
+    }
+    $path = $paths[0]
+    if ($path.StartsWith('"')) {
+        throw 'Git-quoted paths containing special characters are not supported by region helpers.'
+    }
+    $lines = @(git show "$($Commit):$path")
+    if ($LASTEXITCODE -ne 0) { throw "Cannot read '$path' at $Commit." }
+    $hits = @(
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i].IndexOf($Needle, [StringComparison]::Ordinal) -ge 0) { $i + 1 }
+        }
+    )
+    if ($hits.Count -ne 1) {
+        throw ("Expected exactly one line containing '{0}' in '{1}' at {2}; found {3}." -f $Needle, $path, $Commit, $hits.Count)
+    }
+    [pscustomobject]@{
+        Path = $path
+        Start = [Math]::Max(1, $hits[0] - $Around)
+        End = [Math]::Min($lines.Count, $hits[0] + $Around)
+    }
+}
+
+function gdf {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true, Position=0)][string]$From,
+        [Parameter(Mandatory=$true, Position=1)][string]$To,
+        [Parameter(Mandatory=$true, Position=2)][string]$File,
+        [ValidateRange(0, 1000)][int]$Context = 2,
+        [switch]$MergeBase
+    )
+    $range = Get-GitHistoryEndpoints $From $To -MergeBase:$MergeBase
+    $pathspec = ConvertTo-GitHistoryPathspec $File
+    git diff --no-ext-diff --ignore-cr-at-eol "-U$Context" $range.From $range.To -- $pathspec
+}
+
+function gdregion {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true, Position=0)][string]$From,
+        [Parameter(Mandatory=$true, Position=1)][string]$To,
+        [Parameter(Mandatory=$true, Position=2)][string]$File,
+        [Parameter(Mandatory=$true, Position=3)][string]$Needle,
+        [ValidateRange(0, 10000)][int]$Around = 20,
+        [ValidateRange(0, 1000)][int]$Context = 2,
+        [switch]$MergeBase
+    )
+    $range = Get-GitHistoryEndpoints $From $To -MergeBase:$MergeBase
+    $root = git rev-parse --show-toplevel
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot locate repository root.' }
+    Push-Location -LiteralPath $root
+    try {
+        $left = Get-GitHistoryRegion $range.From $File $Needle $Around
+        $right = Get-GitHistoryRegion $range.To $File $Needle $Around
+        $patch = @(git diff --no-color --no-ext-diff --no-textconv --ignore-cr-at-eol "-U$Context" "$($range.From):$($left.Path)" "$($range.To):$($right.Path)")
+        if ($LASTEXITCODE -ne 0) { throw 'Git diff failed.' }
+        $header = @()
+        $keep = $false
+        $started = $false
+        $emitted = $false
+        foreach ($line in $patch) {
+            if ($line -match '^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@') {
+                $started = $true
+                $oldStart = [int]$Matches[1]
+                $oldCount = if ($Matches.ContainsKey(2)) { [int]$Matches[2] } else { 1 }
+                $newStart = [int]$Matches[3]
+                $newCount = if ($Matches.ContainsKey(4)) { [int]$Matches[4] } else { 1 }
+                $oldEnd = $oldStart + [Math]::Max(1, $oldCount) - 1
+                $newEnd = $newStart + [Math]::Max(1, $newCount) - 1
+                $keep = ($oldStart -le $left.End -and $oldEnd -ge $left.Start) -or
+                    ($newStart -le $right.End -and $newEnd -ge $right.Start)
+                if ($keep -and -not $emitted) {
+                    $header
+                    $emitted = $true
+                }
+            } elseif (-not $started) {
+                $header += $line
+            }
+            if ($keep) { $line }
+        }
+        if (-not $emitted) {
+            if ($patch.Count -gt 0 -and -not $started) {
+                throw 'Git did not produce a textual unified diff for this file.'
+            }
+            Write-Host 'No diff hunks intersect the selected regions.'
+        }
+    } finally {
+        Pop-Location
+    }
+}
+
+function glregion {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true, Position=0)][string]$From,
+        [Parameter(Mandatory=$true, Position=1)][string]$To,
+        [Parameter(Mandatory=$true, Position=2)][string]$File,
+        [Parameter(Mandatory=$true, Position=3)][string]$Needle,
+        [ValidateRange(0, 10000)][int]$Around = 20,
+        [switch]$MergeBase
+    )
+    $range = Get-GitHistoryEndpoints $From $To -MergeBase:$MergeBase
+    $bases = @(git merge-base --all $range.From $range.To)
+    if ($LASTEXITCODE -ne 0 -or $range.From -notin $bases) {
+        throw 'From is not an ancestor of To. Use gdregion for endpoint comparison, or -MergeBase for history from a common ancestor.'
+    }
+    $root = git rev-parse --show-toplevel
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot locate repository root.' }
+    Push-Location -LiteralPath $root
+    try {
+        $region = Get-GitHistoryRegion $range.To $File $Needle $Around
+        git log -L ("{0},{1}:{2}" -f $region.Start, $region.End, $region.Path) "$($range.From)..$($range.To)"
+    } finally {
+        Pop-Location
+    }
+}
+
+function glfp { git log --first-parent --graph --oneline --decorate @args }
+
+function gprlog {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory=$true, Position=0)][string]$From,
+        [Parameter(Mandatory=$true, Position=1)][string]$To,
+        [Parameter(Position=2)][string]$File = '*',
+        [ValidateRange(0, 1000)][int]$Context = 2,
+        [switch]$MergeBase
+    )
+    $range = Get-GitHistoryEndpoints $From $To -MergeBase:$MergeBase
+    if ($range.From -eq $range.To) { return }
+    $commits = @(git rev-list --first-parent "$($range.From)..$($range.To)")
+    if ($LASTEXITCODE -ne 0 -or $commits.Count -eq 0) {
+        throw 'From must be on the first-parent history of To.'
+    }
+    $parent = git rev-parse --verify --quiet "$($commits[-1])^1"
+    if ($LASTEXITCODE -ne 0 -or $parent -ne $range.From) {
+        throw 'From must be on the first-parent history of To.'
+    }
+    $pathspec = ConvertTo-GitHistoryPathspec $File
+    git log --first-parent --diff-merges=first-parent -p --ignore-cr-at-eol "-U$Context" "$($range.From)..$($range.To)" -- $pathspec
+}
+
+function gmb { git merge-base @args }
+
 function gfo    { git fetch origin @args }
 function gwt    { git worktree @args }
 function gwta {
@@ -1836,6 +2027,10 @@ function Register-GitAliasCompletion {
     $script:gitAliasMap['gbnmdr'] = 'branch'
     $script:gitAliasMap['gbnmdi'] = 'branch'
     $script:gitAliasMap['gbsc'] = 'branch'
+    $script:gitAliasMap['gdf'] = 'diff'
+    $script:gitAliasMap['gdregion'] = 'diff'
+    $script:gitAliasMap['glregion'] = 'log'
+    $script:gitAliasMap['gprlog'] = 'log'
 
     if ($script:gitAliasMap.Count -eq 0) {
         Write-Warning "No git alias functions were found to register for completion."
