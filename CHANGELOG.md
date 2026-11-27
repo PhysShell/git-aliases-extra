@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 The format is based on Keep a Changelog and the project uses Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- Read-only compact file/glob diffs, literal-anchor region diffs and history, first-parent PR inspection, and merge-base shortcuts (`gdf`, `gdregion`, `glregion`, `glfp`, `gprlog`, `gmb`).
+- Explicit errors for ambiguous historical region targets and invalid history ranges.
+
 ## [0.1.7] - 2026-04-20
 
 ### Added
